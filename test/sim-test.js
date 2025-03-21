@@ -88,17 +88,21 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
   let gameId;
   let playerCards = {};
   
-  // Transaction options with fixed gas settings
+  // Transaction options with higher gas settings
   const txOptions = {
-    gasLimit: 500000 // Regular transactions
+    gasLimit: 2000000 // Increased for regular transactions
   };
-  
+
   const highGasTxOptions = {
-    gasLimit: 2000000 // Complex operations
+    gasLimit: 5000000 // Increased for complex operations
   };
-  
+
   const veryHighGasTxOptions = {
-    gasLimit: 8000000 // Very complex operations
+    gasLimit: 15000000 // Significantly increased for very complex operations
+  };
+
+  const extremeGasTxOptions = {
+    gasLimit: 30000000 // For the most gas-intensive operations like contract deployment
   };
 
   before(async function() {
@@ -139,53 +143,40 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
     
     // Check if contracts are already deployed
     if (process.env.POKER_CONTRACT_ADDRESS && 
-        process.env.SPECTATOR_CONTRACT_ADDRESS && 
-        process.env.CARD_LIBRARY_ADDRESS && 
-        process.env.GAME_LIBRARY_ADDRESS) {
+        process.env.SPECTATOR_CONTRACT_ADDRESS) {
       
       log(`\nUsing existing contracts:`);
-      log(`CardLibrary: ${process.env.CARD_LIBRARY_ADDRESS}`);
-      log(`GameLibrary: ${process.env.GAME_LIBRARY_ADDRESS}`);
       log(`OneCard: ${process.env.POKER_CONTRACT_ADDRESS}`);
       log(`PokerSpectatorView: ${process.env.SPECTATOR_CONTRACT_ADDRESS}`);
 
-      // Get factories for all contracts
-      const CardLibraryFactory = await ethers.getContractFactory("CardLibrary");
-      const GameLibraryFactory = await ethers.getContractFactory("GameLibrary");
+      // Get factories for contracts
       const PokerFactory = await ethers.getContractFactory("OneCard");
       const SpectatorFactory = await ethers.getContractFactory("PokerSpectatorView");
 
       // Attach to existing contracts
-      cardLibrary = CardLibraryFactory.attach(process.env.CARD_LIBRARY_ADDRESS);
-      gameLibrary = GameLibraryFactory.attach(process.env.GAME_LIBRARY_ADDRESS);
       pokerContract = PokerFactory.attach(process.env.POKER_CONTRACT_ADDRESS);
       spectatorContract = SpectatorFactory.attach(process.env.SPECTATOR_CONTRACT_ADDRESS);
     } else {
       // Deploy contracts from scratch
       log("\n----- DEPLOYING CONTRACTS -----");
       
-      // Deploy libraries first
+      // First, deploy CardLibrary
       log("Deploying CardLibrary...");
       const CardLibraryFactory = await ethers.getContractFactory("CardLibrary");
       cardLibrary = await CardLibraryFactory.connect(owner).deploy();
       await cardLibrary.deployed();
       log(`CardLibrary deployed at: ${cardLibrary.address}`);
 
+      // Next, deploy GameLibrary
       log("Deploying GameLibrary...");
       const GameLibraryFactory = await ethers.getContractFactory("GameLibrary");
       gameLibrary = await GameLibraryFactory.connect(owner).deploy();
       await gameLibrary.deployed();
       log(`GameLibrary deployed at: ${gameLibrary.address}`);
 
-      // Link libraries to main contract
-      const PokerFactory = await ethers.getContractFactory("OneCard", {
-        libraries: {
-          CardLibrary: cardLibrary.address,
-          GameLibrary: gameLibrary.address
-        }
-      });
-      
+      // Deploy main contract (no explicit library linking)
       log("Deploying OneCard main contract...");
+      const PokerFactory = await ethers.getContractFactory("OneCard");
       pokerContract = await PokerFactory.connect(owner).deploy();
       await pokerContract.deployed();
       log(`OneCard contract deployed at: ${pokerContract.address}`);
@@ -199,8 +190,6 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
       
       // Log deployment addresses for future use
       log("\nAdd these to your .env file for future use:");
-      log(`CARD_LIBRARY_ADDRESS=${cardLibrary.address}`);
-      log(`GAME_LIBRARY_ADDRESS=${gameLibrary.address}`);
       log(`POKER_CONTRACT_ADDRESS=${pokerContract.address}`);
       log(`SPECTATOR_CONTRACT_ADDRESS=${spectatorContract.address}`);
     }
@@ -226,7 +215,7 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
     
     // Create a new game
     log("\n----- CREATING A NEW GAME -----");
-    const createTx = await pokerContract.connect(keeper).createGame(txOptions);
+    const createTx = await pokerContract.connect(keeper).createGame(veryHighGasTxOptions);
     const createReceipt = await createTx.wait();
     
     // Extract gameId from the event logs
@@ -234,10 +223,9 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
     gameId = gameCreatedEvent.args.gameId.toNumber();
     log(`Created Game with ID: ${gameId}`);
     
-    // Check if players were automatically added (likely were as per contract logic)
-    log("\n----- CHECKING PLAYERS IN GAME -----");
+    // Get the game info to see if players were automatically added
     const playersInGame = await pokerContract.getPlayers(gameId);
-    log(`Players in game: ${playersInGame.length}`);
+    log(`Initial players in game: ${playersInGame.length}`);
     for (let i = 0; i < playersInGame.length; i++) {
       log(`Player ${i+1}: ${playersInGame[i]}`);
     }
@@ -246,7 +234,10 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
     if (playersInGame.length < players.length) {
       log("\n----- ADDING REMAINING PLAYERS TO GAME -----");
       for (let i = 0; i < players.length; i++) {
-        if (!playersInGame.includes(players[i].address)) {
+        const playerInGame = playersInGame.some(addr => 
+          addr.toLowerCase() === players[i].address.toLowerCase());
+        
+        if (!playerInGame) {
           const joinTx = await pokerContract.connect(players[i]).joinGame(gameId, txOptions);
           await joinTx.wait();
           log(`Player ${i+1} (${players[i].address}) joined the game`);
@@ -285,7 +276,13 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
         log("WARNING: PeekPhaseStarted event not found in logs");
       }
       
-      // Get updated game info with phase end time
+      // Get the state update event to check state version
+      const stateUpdateEvent = startPeekReceipt.events.find(e => e.event === "GameStateUpdated");
+      if (stateUpdateEvent) {
+        log(`Game state updated: State=${GameState[stateUpdateEvent.args.state]}, Pot=${stateUpdateEvent.args.potAmount}, CurrentBet=${stateUpdateEvent.args.currentBet}, StateVersion=${stateUpdateEvent.args.stateVersion}`);
+      }
+      
+      // Get updated game info with phase end time and buffer end time
       const updatedGameInfo = await pokerContract.getGameInfo(gameId);
       log(`Phase end time: ${new Date(updatedGameInfo.phaseEndTime * 1000).toISOString()}`);
       log(`Buffer end time: ${new Date(updatedGameInfo.bufferEndTime * 1000).toISOString()}`);
@@ -300,6 +297,7 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
         // On TEN network, we must wait
         if (network.name === "ten") {
           log("Waiting for buffer period to end on TEN network...");
+          
           // Wait until buffer period ends
           while (Math.floor(Date.now() / 1000) < updatedGameInfo.bufferEndTime) {
             await new Promise(resolve => setTimeout(resolve, 5000));
@@ -356,8 +354,14 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
         log(`Player ${i+1} initial chip balance: ${playerInfoBefore.chipBalance}`);
         
         const peekTx = await pokerContract.connect(player).peekAtCard(gameId, highGasTxOptions);
-        await peekTx.wait();
+        const peekReceipt = await peekTx.wait();
         log(`Player ${i+1} (${player.address}) peeked at their card`);
+        
+        // Look for PlayerAction event with nonce
+        const playerActionEvent = peekReceipt.events.find(e => e.event === "PlayerAction");
+        if (playerActionEvent) {
+          log(`Player action: ${playerActionEvent.args.action}, Amount: ${playerActionEvent.args.amount}, Nonce: ${playerActionEvent.args.nonce}`);
+        }
         
         // Get chip balance after peeking
         const playerInfoAfter = await pokerContract.getPlayerInfo(gameId, player.address);
@@ -377,8 +381,14 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
       log(`Player 3 initial chip balance: ${playerInfoBefore.chipBalance}`);
       
       const montyHallTx = await pokerContract.connect(montyHallPlayer).useMontyHallOption(gameId, highGasTxOptions);
-      await montyHallTx.wait();
+      const montyHallReceipt = await montyHallTx.wait();
       log(`Player 3 (${montyHallPlayer.address}) used Monty Hall option`);
+      
+      // Look for PlayerAction event with nonce
+      const playerActionEvent = montyHallReceipt.events.find(e => e.event === "PlayerAction");
+      if (playerActionEvent) {
+        log(`Player action: ${playerActionEvent.args.action}, Amount: ${playerActionEvent.args.amount}, Nonce: ${playerActionEvent.args.nonce}`);
+      }
       
       // Get chip balance after using Monty Hall
       const playerInfoAfter = await pokerContract.getPlayerInfo(gameId, montyHallPlayer.address);
@@ -386,8 +396,14 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
       
       // Decide to swap the card
       const swapTx = await pokerContract.connect(montyHallPlayer).montyHallDecision(gameId, true, highGasTxOptions);
-      await swapTx.wait();
+      const swapReceipt = await swapTx.wait();
       log(`Player 3 decided to swap their card`);
+      
+      // Look for PlayerAction event with nonce
+      const swapActionEvent = swapReceipt.events.find(e => e.event === "PlayerAction");
+      if (swapActionEvent) {
+        log(`Player action: ${swapActionEvent.args.action}, Amount: ${swapActionEvent.args.amount}, Nonce: ${swapActionEvent.args.nonce}`);
+      }
     } catch (error) {
       log(`Error when Player 3 tried to use Monty Hall option: ${error.message}`);
     }
@@ -413,9 +429,9 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
     
     // Wait for peek phase to end
     log("\n----- WAITING FOR PEEK PHASE TO END -----");
-    const updatedGameInfo = await pokerContract.getGameInfo(gameId);
+    const peekGameInfo = await pokerContract.getGameInfo(gameId);
     const currentTime = Math.floor(Date.now() / 1000);
-    const peekPhaseWaitTime = updatedGameInfo.phaseEndTime - currentTime;
+    const peekPhaseWaitTime = peekGameInfo.phaseEndTime - currentTime;
     
     if (peekPhaseWaitTime > 0) {
       log(`Waiting ${peekPhaseWaitTime} seconds for peek phase to end...`);
@@ -423,10 +439,11 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
       // On TEN network, we must wait
       if (network.name === "ten") {
         log("Waiting for peek phase to end on TEN network...");
+        
         // Wait until peek phase ends
-        while (Math.floor(Date.now() / 1000) < updatedGameInfo.phaseEndTime) {
+        while (Math.floor(Date.now() / 1000) < peekGameInfo.phaseEndTime) {
           await new Promise(resolve => setTimeout(resolve, 10000));
-          const remaining = updatedGameInfo.phaseEndTime - Math.floor(Date.now() / 1000);
+          const remaining = peekGameInfo.phaseEndTime - Math.floor(Date.now() / 1000);
           if (remaining > 0 && remaining % 30 === 0) {
             log(`${remaining} seconds remaining in peek phase`);
           }
@@ -461,6 +478,12 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
         log("WARNING: BettingPhaseStarted event not found in logs");
       }
       
+      // Get the state update event to check state version
+      const stateUpdateEvent = endPeekReceipt.events.find(e => e.event === "GameStateUpdated");
+      if (stateUpdateEvent) {
+        log(`Game state updated: State=${GameState[stateUpdateEvent.args.state]}, Pot=${stateUpdateEvent.args.potAmount}, CurrentBet=${stateUpdateEvent.args.currentBet}, StateVersion=${stateUpdateEvent.args.stateVersion}`);
+      }
+      
       // Get updated game info with phase end time
       const updatedGameInfo = await pokerContract.getGameInfo(gameId);
       log(`Phase end time: ${new Date(updatedGameInfo.phaseEndTime * 1000).toISOString()}`);
@@ -476,6 +499,7 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
         // On TEN network, we must wait
         if (network.name === "ten") {
           log("Waiting for buffer period to end on TEN network...");
+          
           // Wait until buffer period ends
           while (Math.floor(Date.now() / 1000) < updatedGameInfo.bufferEndTime) {
             await new Promise(resolve => setTimeout(resolve, 5000));
@@ -500,8 +524,14 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
       const bet1Amount = 5;
       try {
         const bet1Tx = await pokerContract.connect(players[0]).placeBet(gameId, bet1Amount, highGasTxOptions);
-        await bet1Tx.wait();
+        const bet1Receipt = await bet1Tx.wait();
         log(`Player 1 (${players[0].address}) bet ${bet1Amount} chips`);
+        
+        // Look for PlayerAction event with nonce
+        const playerActionEvent = bet1Receipt.events.find(e => e.event === "PlayerAction");
+        if (playerActionEvent) {
+          log(`Player action: ${playerActionEvent.args.action}, Amount: ${playerActionEvent.args.amount}, Nonce: ${playerActionEvent.args.nonce}`);
+        }
         
         // Check pot amount and current bet
         const gameStateAfterBet1 = await pokerContract.getGameInfo(gameId);
@@ -514,8 +544,14 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
       const bet2Amount = 5;
       try {
         const bet2Tx = await pokerContract.connect(players[1]).placeBet(gameId, bet2Amount, highGasTxOptions);
-        await bet2Tx.wait();
+        const bet2Receipt = await bet2Tx.wait();
         log(`Player 2 (${players[1].address}) bet ${bet2Amount} chips`);
+        
+        // Look for PlayerAction event with nonce
+        const playerActionEvent = bet2Receipt.events.find(e => e.event === "PlayerAction");
+        if (playerActionEvent) {
+          log(`Player action: ${playerActionEvent.args.action}, Amount: ${playerActionEvent.args.amount}, Nonce: ${playerActionEvent.args.nonce}`);
+        }
         
         // Check pot amount and current bet
         const gameStateAfterBet2 = await pokerContract.getGameInfo(gameId);
@@ -528,8 +564,14 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
       const bet3Amount = 10;
       try {
         const bet3Tx = await pokerContract.connect(players[2]).placeBet(gameId, bet3Amount, highGasTxOptions);
-        await bet3Tx.wait();
+        const bet3Receipt = await bet3Tx.wait();
         log(`Player 3 (${players[2].address}) bet ${bet3Amount} chips (raising to 10)`);
+        
+        // Look for PlayerAction event with nonce
+        const playerActionEvent = bet3Receipt.events.find(e => e.event === "PlayerAction");
+        if (playerActionEvent) {
+          log(`Player action: ${playerActionEvent.args.action}, Amount: ${playerActionEvent.args.amount}, Nonce: ${playerActionEvent.args.nonce}`);
+        }
         
         // Check pot amount and current bet
         const gameStateAfterBet3 = await pokerContract.getGameInfo(gameId);
@@ -542,226 +584,306 @@ describe("One Card Poker with Monty Hall Full Game Test", function() {
       const bet4Amount = 5; // Additional 5 to match the 10 total
       try {
         const bet4Tx = await pokerContract.connect(players[0]).placeBet(gameId, bet4Amount, highGasTxOptions);
-        await bet4Tx.wait();
+        const bet4Receipt = await bet4Tx.wait();
         log(`Player 1 (${players[0].address}) bet additional ${bet4Amount} chips (calling the raise)`);
         
-        // Check pot amount and current bet
-        const gameStateAfterBet4 = await pokerContract.getGameInfo(gameId);
-        log(`Pot after bet 4: ${gameStateAfterBet4.potAmount.toString()}, Current bet: ${gameStateAfterBet4.currentBet.toString()}`);
-      } catch (error) {
-        log(`Error when Player 1 tried to call the raise: ${error.message}`);
-      }
-      
-      // Second player calls the raise
-      const bet5Amount = 5; // Additional 5 to match the 10 total
-      try {
-        const bet5Tx = await pokerContract.connect(players[1]).placeBet(gameId, bet5Amount, highGasTxOptions);
-        await bet5Tx.wait();
-        log(`Player 2 (${players[1].address}) bet additional ${bet5Amount} chips (calling the raise)`);
-        
-        // Check pot amount and current bet
-        const gameStateAfterBet5 = await pokerContract.getGameInfo(gameId);
-        log(`Pot after bet 5: ${gameStateAfterBet5.potAmount.toString()}, Current bet: ${gameStateAfterBet5.currentBet.toString()}`);
-      } catch (error) {
-        log(`Error when Player 2 tried to call the raise: ${error.message}`);
-      }
-      
-      // Fourth player folds
-      try {
-        const foldTx = await pokerContract.connect(players[3]).fold(gameId, highGasTxOptions);
-        await foldTx.wait();
-        log(`Player 4 (${players[3].address}) folded`);
-        
-        // Check active player count
-        const gameStateAfterFold = await pokerContract.getGameInfo(gameId);
-        log(`Active players after fold: ${gameStateAfterFold.activeCount.toString()}`);
-      } catch (error) {
-        log(`Error when Player 4 tried to fold: ${error.message}`);
-      }
-      
-      // Log player status after betting
-      log("\n----- PLAYER STATUS AFTER BETTING -----");
-      for (let i = 0; i < players.length; i++) {
-        try {
-          const playerInfo = await pokerContract.getPlayerInfo(gameId, players[i].address);
-          log(`Player ${i+1} (${players[i].address}):`);
-          log(`  Chip balance: ${playerInfo.chipBalance}`);
-          log(`  Current bet: ${playerInfo.currentBet}`);
-          log(`  Has folded: ${playerInfo.hasFolded}`);
-          log(`  Action nonce: ${playerInfo.actionNonce.toString()}`);
-        } catch (error) {
-          log(`Error getting info for Player ${i+1}: ${error.message}`);
-        }
-      }
-      
-      // Check if all players have matched bets
-      const allMatched = await pokerContract.checkAllPlayersMatched(gameId);
-      log(`Have all active players matched the current bet? ${allMatched}`);
-      
-      // Set up listener for GameEnded event
-      let gameEndedPromise = new Promise((resolve) => {
-        const gameEndedListener = pokerContract.once("GameEnded", async (gameIdEvent, winner, potAmount) => {
-          if (gameIdEvent.toString() === gameId.toString()) {
-            log(`\n===== GAME ENDED EVENT CAPTURED =====`);
-            log(`Winner: ${winner}`);
-            log(`Pot Amount: ${potAmount.toString()} chips`);
-            
-            // Find which player number won
-            const winnerIndex = players.findIndex(p => p.address.toLowerCase() === winner.toLowerCase());
-            if (winnerIndex !== -1) {
-              log(`Player ${winnerIndex + 1} (${players[winnerIndex].address}) won the game!`);
-            }
-            
-            resolve({ winner, potAmount });
-          }
-        });
-        
-        setTimeout(() => {
-          pokerContract.removeListener("GameEnded", gameEndedListener);
-          resolve({ winner: null, potAmount: 0 });
-        }, 300000); // 5 minute timeout
-      });
-      
-      // Wait for betting phase to end if not manually ending it
-      log("\n----- WAITING FOR BETTING PHASE TO END -----");
-      const bettingGameInfo = await pokerContract.getGameInfo(gameId);
-      const bettingCurrentTime = Math.floor(Date.now() / 1000);
-      const bettingPhaseWaitTime = bettingGameInfo.phaseEndTime - bettingCurrentTime;
-      
-      if (bettingPhaseWaitTime > 0) {
-        log(`Betting phase ends in ${bettingPhaseWaitTime} seconds at ${new Date(bettingGameInfo.phaseEndTime * 1000).toISOString()}`);
-        
-        // Since all players have matched, we can end the betting phase manually
-        log("All players have matched bets, manually ending betting phase...");
-      } else {
-        log("Betting phase has already ended");
-      }
-      
-      // End betting phase and start showdown
-      log("\n----- ENDING BETTING PHASE -----");
-      try {
-        const endBettingTx = await pokerContract.connect(keeper).endBettingPhase(gameId, veryHighGasTxOptions);
-        log("endBettingPhase transaction submitted, waiting for confirmation...");
-        const endBettingReceipt = await endBettingTx.wait();
-        log("endBettingPhase transaction confirmed!");
-        
-        // Look for showdown event
-        const showdownEvent = endBettingReceipt.events.find(e => e.event === "ShowdownStarted");
-        if (showdownEvent) {
-          log("Showdown phase started");
-        } else {
-          log("WARNING: ShowdownStarted event not found in logs");
-        }
-        
-        // Look for game ended event
-        const gameEndedEvent = endBettingReceipt.events.find(e => e.event === "GameEnded");
-        if (gameEndedEvent) {
-          const winner = gameEndedEvent.args.winner;
-          const potAmount = gameEndedEvent.args.potAmount.toString();
-          
-          log(`\n===== GAME RESULTS =====`);
-          log(`Winner: ${winner}`);
-          log(`Pot Amount: ${potAmount} chips`);
-          
-          // Find which player number won
-          const winnerIndex = players.findIndex(p => p.address.toLowerCase() === winner.toLowerCase());
-          if (winnerIndex !== -1) {
-            log(`Player ${winnerIndex + 1} (${players[winnerIndex].address}) won the game!`);
-          }
-        } else {
-          log("Game ended event not found in transaction logs - waiting for async event");
-          // Wait for the event promise to resolve
-          const gameEndResult = await gameEndedPromise;
-          if (gameEndResult.winner) {
-            log(`Async winner detection: ${gameEndResult.winner}`);
-          } else {
-            log("Failed to detect winner asynchronously");
-          }
-        }
-        
-        // Get revealed cards for all players during showdown
-        log("\n----- REVEALED CARDS DURING SHOWDOWN -----");
-        try {
-          const revealedCards = await spectatorContract.getRevealedCardsForSpectating(gameId);
-          const playerAddresses = revealedCards[0];
-          const cardValues = revealedCards[1];
-          const cardSuits = revealedCards[2];
-          
-          for (let i = 0; i < playerAddresses.length; i++) {
-            const playerAddr = playerAddresses[i];
-            // Check if card value is 0 (indicates folded)
-            if (cardValues[i].toNumber() === 0) {
-              log(`Player ${playerAddr} folded`);
-            } else {
-              const cardString = formatCard(cardValues[i].toNumber(), cardSuits[i].toNumber());
-              log(`Player ${playerAddr}: ${cardString}`);
-            }
-          }
-        } catch (error) {
-          log(`Error getting revealed cards: ${error.message}`);
-        }
-        
-        // Get final game state
-        log("\n----- FINAL GAME STATE -----");
-        try {
-          const finalGameState = await pokerContract.getGameInfo(gameId);
-          log(`Game state: ${GameState[finalGameState.state]}`);
-          log(`Pot amount: ${finalGameState.potAmount.toString()}`);
-          log(`State version: ${finalGameState.stateVersion.toString()}`);
-          
-          // Get final player balances
-          log("\n----- FINAL PLAYER BALANCES -----");
-          for (let i = 0; i < players.length; i++) {
-            try {
-              const playerInfo = await pokerContract.getPlayerInfo(gameId, players[i].address);
-              log(`Player ${i+1} (${players[i].address}):`);
-              log(`  Initial balance: ${initialChipBalances[players[i].address].toString()}`);
-              log(`  Final balance: ${playerInfo.chipBalance.toString()}`);
-              log(`  Difference: ${playerInfo.chipBalance.sub(initialChipBalances[players[i].address]).toString()}`);
-              
-              // Check if this player gained chips (potential winner)
-              if (playerInfo.chipBalance.gt(initialChipBalances[players[i].address])) {
-                log(`*** Player ${i+1} gained ${playerInfo.chipBalance.sub(initialChipBalances[players[i].address]).toString()} chips - WINNER! ***`);
-              }
-            } catch (error) {
-              log(`Error getting info for Player ${i+1}: ${error.message}`);
-            }
-          }
-        } catch (error) {
-          log(`Error getting final game info: ${error.message}`);
-        }
-        
-        // Cleanup the game
-        log("\n----- CLEANING UP THE GAME -----");
-        try {
-          const cleanupTx = await pokerContract.connect(keeper).cleanup(gameId, highGasTxOptions);
-          const cleanupReceipt = await cleanupTx.wait();
-          log("Game cleaned up successfully");
-          
-          // Check if game is now marked as cleaned up
-          const finalGameInfo = await pokerContract.getGameInfo(gameId);
-          log(`Game is cleaned up: ${finalGameInfo.isCleanedUp}`);
-          
-          // Look for GameNoLongerSpectatable event
-          const gameNoLongerSpectatableEvent = cleanupReceipt.events.find(e => e.event === "GameNoLongerSpectatable");
-          if (gameNoLongerSpectatableEvent) {
-            log("Game is no longer spectatable");
-          }
-        } catch (error) {
-          log(`Error cleaning up game: ${error.message}`);
-        }
-      } catch (error) {
-        log(`Error ending betting phase: ${error.message}`);
-        throw error;
-      }
-    } catch (error) {
-      log(`Error during game flow: ${error.message}`);
-      throw error;
+// Look for PlayerAction event with nonce
+const playerActionEvent = bet4Receipt.events.find(e => e.event === "PlayerAction");
+if (playerActionEvent) {
+  log(`Player action: ${playerActionEvent.args.action}, Amount: ${playerActionEvent.args.amount}, Nonce: ${playerActionEvent.args.nonce}`);
+}
+
+// Check pot amount and current bet
+const gameStateAfterBet4 = await pokerContract.getGameInfo(gameId);
+log(`Pot after bet 4: ${gameStateAfterBet4.potAmount.toString()}, Current bet: ${gameStateAfterBet4.currentBet.toString()}`);
+} catch (error) {
+log(`Error when Player 1 tried to call the raise: ${error.message}`);
+}
+
+// Second player calls the raise
+const bet5Amount = 5; // Additional 5 to match the 10 total
+try {
+const bet5Tx = await pokerContract.connect(players[1]).placeBet(gameId, bet5Amount, highGasTxOptions);
+const bet5Receipt = await bet5Tx.wait();
+log(`Player 2 (${players[1].address}) bet additional ${bet5Amount} chips (calling the raise)`);
+
+// Look for PlayerAction event with nonce
+const playerActionEvent = bet5Receipt.events.find(e => e.event === "PlayerAction");
+if (playerActionEvent) {
+  log(`Player action: ${playerActionEvent.args.action}, Amount: ${playerActionEvent.args.amount}, Nonce: ${playerActionEvent.args.nonce}`);
+}
+
+// Check pot amount and current bet
+const gameStateAfterBet5 = await pokerContract.getGameInfo(gameId);
+log(`Pot after bet 5: ${gameStateAfterBet5.potAmount.toString()}, Current bet: ${gameStateAfterBet5.currentBet.toString()}`);
+} catch (error) {
+log(`Error when Player 2 tried to call the raise: ${error.message}`);
+}
+
+// Fourth player folds
+try {
+const foldTx = await pokerContract.connect(players[3]).fold(gameId, highGasTxOptions);
+const foldReceipt = await foldTx.wait();
+log(`Player 4 (${players[3].address}) folded`);
+
+// Look for PlayerAction event with nonce
+const playerActionEvent = foldReceipt.events.find(e => e.event === "PlayerAction");
+if (playerActionEvent) {
+  log(`Player action: ${playerActionEvent.args.action}, Amount: ${playerActionEvent.args.amount}, Nonce: ${playerActionEvent.args.nonce}`);
+}
+
+// Check active player count
+const gameStateAfterFold = await pokerContract.getGameInfo(gameId);
+log(`Active players after fold: ${gameStateAfterFold.activeCount.toString()}`);
+} catch (error) {
+log(`Error when Player 4 tried to fold: ${error.message}`);
+}
+
+// Log player status after betting
+log("\n----- PLAYER STATUS AFTER BETTING -----");
+for (let i = 0; i < players.length; i++) {
+try {
+  const playerInfo = await pokerContract.getPlayerInfo(gameId, players[i].address);
+  log(`Player ${i+1} (${players[i].address}):`);
+  log(`  Chip balance: ${playerInfo.chipBalance}`);
+  log(`  Current bet: ${playerInfo.currentBet}`);
+  log(`  Has folded: ${playerInfo.hasFolded}`);
+  log(`  Action nonce: ${playerInfo.actionNonce.toString()}`);
+} catch (error) {
+  log(`Error getting info for Player ${i+1}: ${error.message}`);
+}
+}
+
+// Check if all players have matched bets
+const allMatched = await pokerContract.checkAllPlayersMatched(gameId);
+log(`Have all active players matched the current bet? ${allMatched}`);
+
+// Set up listener for GameEnded event
+let gameEndedPromise = new Promise((resolve) => {
+const gameEndedListener = pokerContract.once("GameEnded", async (gameIdEvent, winner, potAmount) => {
+  if (gameIdEvent.toString() === gameId.toString()) {
+    log(`\n===== GAME ENDED EVENT CAPTURED =====`);
+    log(`Winner: ${winner}`);
+    log(`Pot Amount: ${potAmount.toString()} chips`);
+    
+    // Find which player number won
+    const winnerIndex = players.findIndex(p => p.address.toLowerCase() === winner.toLowerCase());
+    if (winnerIndex !== -1) {
+      log(`Player ${winnerIndex + 1} (${players[winnerIndex].address}) won the game!`);
     }
     
-    log("\n===== ONE CARD POKER WITH MONTY HALL FULL GAME TEST COMPLETED =====");
+    resolve({ winner, potAmount });
+  }
+});
+
+// Ensure we clean up the listener after a timeout
+setTimeout(() => {
+  pokerContract.removeListener("GameEnded", gameEndedListener);
+  resolve({ winner: null, potAmount: 0 });
+}, 300000); // 5 minute timeout
+});
+
+// Wait for betting phase to end if not manually ending it
+log("\n----- WAITING FOR BETTING PHASE TO END -----");
+const bettingGameInfo = await pokerContract.getGameInfo(gameId);
+const bettingCurrentTime = Math.floor(Date.now() / 1000);
+const bettingPhaseWaitTime = bettingGameInfo.phaseEndTime - bettingCurrentTime;
+
+if (bettingPhaseWaitTime > 0) {
+log(`Betting phase ends in ${bettingPhaseWaitTime} seconds at ${new Date(bettingGameInfo.phaseEndTime * 1000).toISOString()}`);
+
+// Since all players have matched, we can end the betting phase manually
+log("All players have matched bets, manually ending betting phase...");
+} else {
+log("Betting phase has already ended");
+}
+
+//debugging
+log("\n----- CHECKING GAME STATE BEFORE ENDING BETTING PHASE -----");
+try {
+  const gameInfo = await pokerContract.getGameInfo(gameId);
+  log(`Current game state: ${GameState[gameInfo.state]}`);
+  log(`Phase end time: ${new Date(gameInfo.phaseEndTime * 1000).toISOString()}`);
+  log(`Current time: ${new Date().toISOString()}`);
+  log(`Buffer end time: ${new Date(gameInfo.bufferEndTime * 1000).toISOString()}`);
+  log(`Is in buffer period: ${gameInfo.bufferEndTime > Math.floor(Date.now() / 1000)}`);
+  log(`Is phase ended: ${gameInfo.phaseEndTime < Math.floor(Date.now() / 1000)}`);
+
+  // Check if the caller is the keeper
+  const isKeeper = await pokerContract.isKeeper(keeper.address);
+  log(`Is caller (${keeper.address}) a keeper: ${isKeeper}`);
+
+  // If the phase hasn't ended yet, wait for it
+  const currentTime = Math.floor(Date.now() / 1000);
+  if (gameInfo.phaseEndTime > currentTime) {
+    const waitTimeSeconds = gameInfo.phaseEndTime - currentTime;
+    log(`Betting phase hasn't ended yet. Waiting ${waitTimeSeconds} seconds...`);
     
-    // Close the log file
-    logStream.end();
-  });
+    if (network.name === "ten") {
+      log("Waiting for phase to end on TEN network...");
+      while (Math.floor(Date.now() / 1000) < gameInfo.phaseEndTime) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        const remaining = gameInfo.phaseEndTime - Math.floor(Date.now() / 1000);
+        if (remaining > 0 && remaining % 10 === 0) {
+          log(`${remaining} seconds remaining until phase ends`);
+        }
+      }
+      log("Betting phase has now ended");
+    } else {
+      // On local network, advance time
+      await ethers.provider.send("evm_increaseTime", [waitTimeSeconds + 5]);
+      await ethers.provider.send("evm_mine");
+      log("Time advanced past betting phase end");
+    }
+
+    // Check game state again after waiting
+    const updatedGameInfo = await pokerContract.getGameInfo(gameId);
+    log(`Game state after waiting: ${GameState[updatedGameInfo.state]}`);
+    log(`Updated phase end time: ${new Date(updatedGameInfo.phaseEndTime * 1000).toISOString()}`);
+    log(`Updated buffer end time: ${new Date(updatedGameInfo.bufferEndTime * 1000).toISOString()}`);
+  }
+} catch (error) {
+  log(`Error checking game state: ${error.message}`);
+}
+
+// End betting phase and start showdown
+log("\n----- ENDING BETTING PHASE -----");
+try {
+const endBettingTx = await pokerContract.connect(keeper).endBettingPhase(gameId, veryHighGasTxOptions);
+log("endBettingPhase transaction submitted, waiting for confirmation...");
+const endBettingReceipt = await endBettingTx.wait();
+log("endBettingPhase transaction confirmed!");
+
+// Look for showdown event
+const showdownEvent = endBettingReceipt.events.find(e => e.event === "ShowdownStarted");
+if (showdownEvent) {
+  log("Showdown phase started");
+} else {
+  log("WARNING: ShowdownStarted event not found in logs");
+}
+
+// Look for game ended event
+const gameEndedEvent = endBettingReceipt.events.find(e => e.event === "GameEnded");
+if (gameEndedEvent) {
+  const winner = gameEndedEvent.args.winner;
+  const potAmount = gameEndedEvent.args.potAmount.toString();
+  
+  log(`\n===== GAME RESULTS =====`);
+  log(`Winner: ${winner}`);
+  log(`Pot Amount: ${potAmount} chips`);
+  
+  // Find which player number won
+  const winnerIndex = players.findIndex(p => p.address.toLowerCase() === winner.toLowerCase());
+  if (winnerIndex !== -1) {
+    log(`Player ${winnerIndex + 1} (${players[winnerIndex].address}) won the game!`);
+  }
+} else {
+  log("Game ended event not found in transaction logs - waiting for async event");
+  // Wait for the event promise to resolve
+  const gameEndResult = await gameEndedPromise;
+  if (gameEndResult.winner) {
+    log(`Async winner detection: ${gameEndResult.winner}`);
+  } else {
+    log("Failed to detect winner asynchronously");
+  }
+}
+
+// Get the state update event to check final state version
+const stateUpdateEvent = endBettingReceipt.events.find(e => e.event === "GameStateUpdated");
+if (stateUpdateEvent) {
+  log(`Final game state: State=${GameState[stateUpdateEvent.args.state]}, Pot=${stateUpdateEvent.args.potAmount}, CurrentBet=${stateUpdateEvent.args.currentBet}, StateVersion=${stateUpdateEvent.args.stateVersion}`);
+}
+
+// Get revealed cards for all players during showdown
+log("\n----- REVEALED CARDS DURING SHOWDOWN -----");
+try {
+  const revealedCards = await spectatorContract.getRevealedCardsForSpectating(gameId);
+  const playerAddresses = revealedCards[0];
+  const cardValues = revealedCards[1];
+  const cardSuits = revealedCards[2];
+  
+  for (let i = 0; i < playerAddresses.length; i++) {
+    const playerAddr = playerAddresses[i];
+    // Check if card value is 0 (indicates folded)
+    if (cardValues[i].toNumber() === 0) {
+      log(`Player ${playerAddr} folded`);
+    } else {
+      const cardString = formatCard(cardValues[i].toNumber(), cardSuits[i].toNumber());
+      log(`Player ${playerAddr}: ${cardString}`);
+    }
+  }
+} catch (error) {
+  log(`Error getting revealed cards: ${error.message}`);
+}
+
+// Get final game state
+log("\n----- FINAL GAME STATE -----");
+try {
+  const finalGameState = await pokerContract.getGameInfo(gameId);
+  log(`Game state: ${GameState[finalGameState.state]}`);
+  log(`Pot amount: ${finalGameState.potAmount.toString()}`);
+  log(`State version: ${finalGameState.stateVersion.toString()}`);
+  log(`Is cleaned up: ${finalGameState.isCleanedUp}`);
+  
+  // Get final player balances
+  log("\n----- FINAL PLAYER BALANCES -----");
+  for (let i = 0; i < players.length; i++) {
+    try {
+      const playerInfo = await pokerContract.getPlayerInfo(gameId, players[i].address);
+      log(`Player ${i+1} (${players[i].address}):`);
+      log(`  Initial balance: ${initialChipBalances[players[i].address].toString()}`);
+      log(`  Final balance: ${playerInfo.chipBalance.toString()}`);
+      log(`  Difference: ${playerInfo.chipBalance.sub(initialChipBalances[players[i].address]).toString()}`);
+      
+      // Check if this player gained chips (potential winner)
+      if (playerInfo.chipBalance.gt(initialChipBalances[players[i].address])) {
+        log(`*** Player ${i+1} gained ${playerInfo.chipBalance.sub(initialChipBalances[players[i].address]).toString()} chips - WINNER! ***`);
+      }
+    } catch (error) {
+      log(`Error getting info for Player ${i+1}: ${error.message}`);
+    }
+  }
+} catch (error) {
+  log(`Error getting final game info: ${error.message}`);
+}
+
+// Cleanup the game
+log("\n----- CLEANING UP THE GAME -----");
+try {
+  const cleanupTx = await pokerContract.connect(keeper).cleanup(gameId, highGasTxOptions);
+  const cleanupReceipt = await cleanupTx.wait();
+  log("Game cleaned up successfully");
+  
+  // Check if game is now marked as cleaned up
+  const finalGameInfo = await pokerContract.getGameInfo(gameId);
+  log(`Game is cleaned up: ${finalGameInfo.isCleanedUp}`);
+  
+  // Look for GameNoLongerSpectatable event
+  const gameNoLongerSpectatableEvent = cleanupReceipt.events.find(e => e.event === "GameNoLongerSpectatable");
+  if (gameNoLongerSpectatableEvent) {
+    log("Game is no longer spectatable");
+  }
+  
+  // Look for final state update event
+  const finalStateUpdateEvent = cleanupReceipt.events.find(e => e.event === "GameStateUpdated");
+  if (finalStateUpdateEvent) {
+    log(`Final state update: State=${GameState[finalStateUpdateEvent.args.state]}, StateVersion=${finalStateUpdateEvent.args.stateVersion}`);
+  }
+} catch (error) {
+  log(`Error cleaning up game: ${error.message}`);
+}
+} catch (error) {
+log(`Error ending betting phase: ${error.message}`);
+throw error;
+}
+} catch (error) {
+log(`Error during game flow: ${error.message}`);
+throw error;
+}
+
+log("\n===== ONE CARD POKER WITH MONTY HALL FULL GAME TEST COMPLETED =====");
+
+// Close the log file
+logStream.end();
+});
 });
