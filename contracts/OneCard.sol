@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-contract HiddenOneCardPoker {
+import "./PokerCardLibrary.sol";
+import "./PokerGameLibrary.sol";
+
+contract OneCard {
+    using CardLibrary for CardLibrary.Card[];
+    using GameLibrary for uint256;
+    
     // Simple ownership - contract deployer is the fixed owner/admin
     address private immutable _owner;
     
     // Game constants
-    uint8 private constant STANDARD_DECK_SIZE = 52;
+    uint8 private constant STANDARD_DECK_SIZE = 52; // Match the constant in CardLibrary
     uint8 private constant MAX_PLAYERS = 5; // Maximum 5 players per game
     uint256 private constant INITIAL_CHIPS = 25;    
     uint256 private constant PEEK_FEE = 5;
@@ -21,21 +27,6 @@ contract HiddenOneCardPoker {
     // Whitelist tracking - with efficient array access
     mapping(address => bool) private whitelistedPlayers;
     address[] private whitelistedPlayersList;
-    
-    // Card representations (2-14, where 11=J, 12=Q, 13=K, 14=A)
-    struct Card {
-        uint8 value; // 2-14
-        uint8 suit;  // 0-3 (0=Hearts, 1=Diamonds, 2=Clubs, 3=Spades)
-    }
-
-    // Game state definitions
-    enum GameState { 
-        REGISTRATION,  // Accepting players
-        PEEK_PHASE,    // Players can peek/swap cards
-        BETTING,       // Players place bets
-        SHOWDOWN,      // Cards revealed, winner determined
-        ENDED          // Game completed
-    }
     
     // Player state - optimized packing (booleans together)
     struct Player {
@@ -54,11 +45,11 @@ contract HiddenOneCardPoker {
     // Game structure - optimized to reduce storage usage
     struct Game {
         uint256 gameId;
-        GameState state;
+        GameLibrary.GameState state;
         address[] players;
         uint256 activePlayerCount; // Track active players to avoid recomputation
         mapping(address => Player) playerInfo;
-        Card[] deck;
+        CardLibrary.Card[] deck;
         // Card assignment and revealed card tracking - using bitmaps for efficiency
         uint256 cardAssignmentBitmap; // Uses a single storage slot for all 52 cards
         uint256 revealedCardsBitmap;  // Track cards revealed through Monty Hall
@@ -72,6 +63,7 @@ contract HiddenOneCardPoker {
     uint256 private currentGameId;
     mapping(uint256 => Game) private games;
     mapping(address => uint256) private playerCurrentGame;
+    uint256[] private activeGames; // Array to track active games for spectating
     
     // Service keeper addresses
     mapping(address => bool) private authorizedKeepers;
@@ -94,6 +86,11 @@ contract HiddenOneCardPoker {
     // Added events for Monty Hall feature
     event MontyHallCardsRevealed(address indexed player, uint8[] values, uint8[] suits);
     event MontyHallSwapResult(address indexed player, uint8 oldValue, uint8 oldSuit, uint8 newValue, uint8 newSuit);
+    
+    // Events for spectating
+    event GameSpectatable(uint256 indexed gameId, GameLibrary.GameState state, uint256 playerCount);
+    event GameNoLongerSpectatable(uint256 indexed gameId);
+    event GameStateUpdated(uint256 indexed gameId, GameLibrary.GameState state, uint256 potAmount, uint256 currentBet);
     
     constructor() {
         _owner = msg.sender;
@@ -153,34 +150,34 @@ contract HiddenOneCardPoker {
         return whitelistedPlayers[player];
     }
     
-    // Bitmap operations for card assignments
+    // Bitmap operations for card assignments using GameLibrary
     function _isCardAssigned(uint256 gameId, uint8 cardIdx) private view returns (bool) {
-        return (games[gameId].cardAssignmentBitmap & (1 << cardIdx)) != 0;
+        return GameLibrary.isCardAssigned(games[gameId].cardAssignmentBitmap, cardIdx);
     }
     
     function _assignCard(uint256 gameId, uint8 cardIdx) private {
-        games[gameId].cardAssignmentBitmap |= (1 << cardIdx);
+        games[gameId].cardAssignmentBitmap = GameLibrary.assignCard(games[gameId].cardAssignmentBitmap, cardIdx);
     }
     
     function _unassignCard(uint256 gameId, uint8 cardIdx) private {
-        games[gameId].cardAssignmentBitmap &= ~(1 << cardIdx);
+        games[gameId].cardAssignmentBitmap = GameLibrary.unassignCard(games[gameId].cardAssignmentBitmap, cardIdx);
     }
     
     function _clearCardAssignments(uint256 gameId) private {
-        games[gameId].cardAssignmentBitmap = 0;
+        games[gameId].cardAssignmentBitmap = GameLibrary.clearCardAssignments();
     }
     
-    // Bitmap operations for Monty Hall revealed cards
+    // Bitmap operations for Monty Hall revealed cards using GameLibrary
     function _isCardRevealed(uint256 gameId, uint8 cardIdx) private view returns (bool) {
-        return (games[gameId].revealedCardsBitmap & (1 << cardIdx)) != 0;
+        return GameLibrary.isCardRevealed(games[gameId].revealedCardsBitmap, cardIdx);
     }
     
     function _markCardRevealed(uint256 gameId, uint8 cardIdx) private {
-        games[gameId].revealedCardsBitmap |= (1 << cardIdx);
+        games[gameId].revealedCardsBitmap = GameLibrary.markCardRevealed(games[gameId].revealedCardsBitmap, cardIdx);
     }
     
     function _clearRevealedCards(uint256 gameId) private {
-        games[gameId].revealedCardsBitmap = 0;
+        games[gameId].revealedCardsBitmap = GameLibrary.clearRevealedCards();
     }
     
     // Keeper management
@@ -203,11 +200,15 @@ contract HiddenOneCardPoker {
         
         Game storage newGame = games[gameId];
         newGame.gameId = gameId;
-        newGame.state = GameState.REGISTRATION;
+        newGame.state = GameLibrary.GameState.REGISTRATION;
         newGame.gameKeeper = msg.sender;
         newGame.activePlayerCount = 0;
         
+        // Add this game to the active games list for spectating
+        activeGames.push(gameId);
+        
         emit GameCreated(gameId, msg.sender);
+        emit GameSpectatable(gameId, GameLibrary.GameState.REGISTRATION, 0);
         
         // Auto-add whitelisted players to the game - efficient for 5 players
         for (uint256 i = 0; i < whitelistedPlayersList.length && i < MAX_PLAYERS; i++) {
@@ -251,7 +252,7 @@ contract HiddenOneCardPoker {
     function joinGame(uint256 gameId) external gameExists(gameId) {
         Game storage game = games[gameId];
         
-        require(game.state == GameState.REGISTRATION, "Not registration state");
+        require(game.state == GameLibrary.GameState.REGISTRATION, "Not registration state");
         require(game.players.length < MAX_PLAYERS, "Game full");
         require(playerCurrentGame[msg.sender] == 0, "Already in a game");
         
@@ -275,7 +276,7 @@ contract HiddenOneCardPoker {
     function addPlayerToGame(uint256 gameId, address player) external onlyKeeper gameExists(gameId) {
         Game storage game = games[gameId];
         
-        require(game.state == GameState.REGISTRATION, "Not registration state");
+        require(game.state == GameLibrary.GameState.REGISTRATION, "Not registration state");
         require(game.players.length < MAX_PLAYERS, "Game full");
         require(playerCurrentGame[player] == 0, "Player already in a game");
         
@@ -299,7 +300,7 @@ contract HiddenOneCardPoker {
     function startPeekPhase(uint256 gameId) external onlyKeeper gameExists(gameId) {
         Game storage game = games[gameId];
         
-        require(game.state == GameState.REGISTRATION, "Not registration state");
+        require(game.state == GameLibrary.GameState.REGISTRATION, "Not registration state");
         require(game.players.length >= 2, "Need 2+ players");
         
         // Initialize and shuffle the deck using Fisher-Yates algorithm
@@ -315,10 +316,11 @@ contract HiddenOneCardPoker {
         game.phaseEndTime = block.timestamp + PEEK_PHASE_DURATION;
         
         // Move to peek phase
-        game.state = GameState.PEEK_PHASE;
+        game.state = GameLibrary.GameState.PEEK_PHASE;
         
         // Client will calculate endTime = block.timestamp + PEEK_PHASE_DURATION
         emit PeekPhaseStarted(gameId);
+        emit GameStateUpdated(gameId, GameLibrary.GameState.PEEK_PHASE, game.potAmount, game.currentBetAmount);
     }
     
     // Helper function to initialize the deck with Fisher-Yates shuffle using prevrandao
@@ -328,24 +330,24 @@ contract HiddenOneCardPoker {
         // Clear any existing cards
         delete game.deck;
         
+        // Create a standard sized deck first using CardLibrary
+        CardLibrary.Card[] memory initialDeck = new CardLibrary.Card[](STANDARD_DECK_SIZE);
+        uint8 index = 0;
+        
         // Create a standard 52-card deck
         for (uint8 suit = 0; suit < 4; suit++) {
             for (uint8 value = 2; value <= 14; value++) {
-                game.deck.push(Card(value, suit));
+                initialDeck[index] = CardLibrary.Card(value, suit);
+                index++;
             }
         }
         
-        // Perform Fisher-Yates shuffle using TEN Network's secure PREVRANDAO
-        uint256 prevrandao = block.prevrandao;
+        // Use the shuffleDeck function from the CardLibrary
+        CardLibrary.Card[] memory shuffledDeck = CardLibrary.shuffleDeck(initialDeck);
         
-        for (uint256 i = STANDARD_DECK_SIZE - 1; i > 0; i--) {
-            // Generate random index j such that 0 <= j <= i using PREVRANDAO
-            uint256 j = uint256(keccak256(abi.encodePacked(prevrandao, i))) % (i + 1);
-            
-            // Swap elements at indices i and j
-            Card memory temp = game.deck[i];
-            game.deck[i] = game.deck[j];
-            game.deck[j] = temp;
+        // Update the game deck with the shuffled deck
+        for (uint i = 0; i < STANDARD_DECK_SIZE; i++) {
+            game.deck.push(shuffledDeck[i]);
         }
     }
     
@@ -370,7 +372,7 @@ contract HiddenOneCardPoker {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
-        require(game.state == GameState.PEEK_PHASE, "Not peek phase");
+        require(game.state == GameLibrary.GameState.PEEK_PHASE, "Not peek phase");
         require(block.timestamp < game.phaseEndTime, "Peek phase ended");
         require(!player.hasPeeked, "Already peeked");
         require(player.chipBalance >= PEEK_FEE, "Insufficient chips");
@@ -382,7 +384,7 @@ contract HiddenOneCardPoker {
         
         // Get the player's card
         uint8 cardIdx = player.cardIdx;
-        Card memory playerCard = game.deck[cardIdx];
+        CardLibrary.Card memory playerCard = game.deck[cardIdx];
         
         // Use a private event to notify the player of their card
         emit CardRevealed(msg.sender, playerCard.value, playerCard.suit);
@@ -396,7 +398,7 @@ contract HiddenOneCardPoker {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
-        require(game.state == GameState.PEEK_PHASE, "Not peek phase");
+        require(game.state == GameLibrary.GameState.PEEK_PHASE, "Not peek phase");
         require(block.timestamp < game.phaseEndTime, "Peek phase ended");
         require(!player.usedMontyHall, "Already used Monty Hall option");
         require(player.chipBalance >= MONTY_HALL_FEE, "Insufficient chips");
@@ -433,7 +435,7 @@ contract HiddenOneCardPoker {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
-        require(game.state == GameState.PEEK_PHASE, "Not peek phase");
+        require(game.state == GameLibrary.GameState.PEEK_PHASE, "Not peek phase");
         require(block.timestamp < game.phaseEndTime, "Peek phase ended");
         require(player.usedMontyHall, "Monty Hall option not used");
         
@@ -446,7 +448,7 @@ contract HiddenOneCardPoker {
         
         // Get current card info before swapping
         uint8 currentCardIdx = player.cardIdx;
-        Card memory currentCard = game.deck[currentCardIdx];
+        CardLibrary.Card memory currentCard = game.deck[currentCardIdx];
         
         // Mark the current card as unassigned
         _unassignCard(gameId, currentCardIdx);
@@ -460,7 +462,7 @@ contract HiddenOneCardPoker {
         player.lastActionTime = block.timestamp;
         
         // Get the new card info
-        Card memory newCard = game.deck[newCardIdx];
+        CardLibrary.Card memory newCard = game.deck[newCardIdx];
         
         // Emit the swap result to the player
         emit MontyHallSwapResult(
@@ -514,7 +516,7 @@ contract HiddenOneCardPoker {
             uint8 cardIdx = eligibleIndices[randomIndex];
             
             // Get the card information
-            Card memory randomCard = game.deck[cardIdx];
+            CardLibrary.Card memory randomCard = game.deck[cardIdx];
             
             // Store the card information
             values[i] = randomCard.value;
@@ -561,15 +563,16 @@ contract HiddenOneCardPoker {
     function endPeekPhase(uint256 gameId) external onlyKeeper gameExists(gameId) {
         Game storage game = games[gameId];
         
-        require(game.state == GameState.PEEK_PHASE, "Not peek phase");
+        require(game.state == GameLibrary.GameState.PEEK_PHASE, "Not peek phase");
         require(block.timestamp >= game.phaseEndTime, "Peek phase not finished");
         
         // Start betting phase
-        game.state = GameState.BETTING;
+        game.state = GameLibrary.GameState.BETTING;
         game.phaseEndTime = block.timestamp + BETTING_PHASE_DURATION;
         
         // Client will calculate endTime = block.timestamp + BETTING_PHASE_DURATION
         emit BettingPhaseStarted(gameId);
+        emit GameStateUpdated(gameId, GameLibrary.GameState.BETTING, game.potAmount, game.currentBetAmount);
     }
     
     // Function for players to place bets
@@ -577,7 +580,7 @@ contract HiddenOneCardPoker {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
-        require(game.state == GameState.BETTING, "Not betting phase");
+        require(game.state == GameLibrary.GameState.BETTING, "Not betting phase");
         require(block.timestamp < game.phaseEndTime, "Betting phase ended");
         require(!player.hasFolded, "Already folded");
         require(betAmount >= MINIMUM_BET, "Bet too small");
@@ -605,6 +608,8 @@ contract HiddenOneCardPoker {
         
         // Unified player action event
         emit PlayerAction(gameId, msg.sender, "bet", betAmount);
+        // Update spectators
+        emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount);
     }
     
     // Function for players to fold
@@ -612,7 +617,7 @@ contract HiddenOneCardPoker {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
-        require(game.state == GameState.BETTING, "Not betting phase");
+        require(game.state == GameLibrary.GameState.BETTING, "Not betting phase");
         require(block.timestamp < game.phaseEndTime, "Betting phase ended");
         require(!player.hasFolded, "Already folded");
         
@@ -624,6 +629,8 @@ contract HiddenOneCardPoker {
         
         // Unified player action event
         emit PlayerAction(gameId, msg.sender, "fold", 0);
+        // Update spectators
+        emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount);
         
         // Check if only one player remains
         if (game.activePlayerCount == 1) {
@@ -652,7 +659,7 @@ contract HiddenOneCardPoker {
     function endBettingPhase(uint256 gameId) external onlyKeeper gameExists(gameId) {
         Game storage game = games[gameId];
         
-        require(game.state == GameState.BETTING, "Not betting phase");
+        require(game.state == GameLibrary.GameState.BETTING, "Not betting phase");
         require(block.timestamp >= game.phaseEndTime, "Betting phase not finished");
         
         _startShowdown(gameId);
@@ -662,9 +669,10 @@ contract HiddenOneCardPoker {
     function _startShowdown(uint256 gameId) private {
         Game storage game = games[gameId];
         
-        game.state = GameState.SHOWDOWN;
+        game.state = GameLibrary.GameState.SHOWDOWN;
         
         emit ShowdownStarted(gameId);
+        emit GameStateUpdated(gameId, GameLibrary.GameState.SHOWDOWN, game.potAmount, game.currentBetAmount);
         
         // Determine winner during showdown
         _determineWinner(gameId);
@@ -685,7 +693,7 @@ contract HiddenOneCardPoker {
             
             // Reveal card to all players
             uint8 cardIdx = game.playerInfo[player].cardIdx;
-            Card memory playerCard = game.deck[cardIdx];
+            CardLibrary.Card memory playerCard = game.deck[cardIdx];
             emit CardRevealed(player, playerCard.value, playerCard.suit);
         }
         
@@ -708,7 +716,7 @@ contract HiddenOneCardPoker {
             if (game.playerInfo[player].hasFolded) continue;
             
             uint8 cardIdx = game.playerInfo[player].cardIdx;
-            Card memory playerCard = game.deck[cardIdx];
+            CardLibrary.Card memory playerCard = game.deck[cardIdx];
             
             // Check if this card is higher - simplified logic
             if (playerCard.value > highestValue || 
@@ -730,10 +738,11 @@ contract HiddenOneCardPoker {
         unchecked { game.playerInfo[winner].chipBalance += game.potAmount; }
         
         // Move game to ended state
-        game.state = GameState.ENDED;
+        game.state = GameLibrary.GameState.ENDED;
         
         uint256 potAmount = game.potAmount;
         emit GameEnded(gameId, winner, potAmount);
+        emit GameStateUpdated(gameId, GameLibrary.GameState.ENDED, potAmount, game.currentBetAmount);
         
         // Reset game state for cleanup
         game.potAmount = 0;
@@ -744,7 +753,7 @@ contract HiddenOneCardPoker {
     function checkAllPlayersMatched(uint256 gameId) external view gameExists(gameId) returns (bool) {
         Game storage game = games[gameId];
         
-        if (game.state != GameState.BETTING) {
+        if (game.state != GameLibrary.GameState.BETTING) {
             return false;
         }
         
@@ -771,7 +780,7 @@ contract HiddenOneCardPoker {
     
     // Combined function to get all game and phase information in a single call
     function getGameInfo(uint256 gameId) external view gameExists(gameId) returns (
-        GameState state,
+        GameLibrary.GameState state,
         uint256 potAmount,
         uint256 currentBet,
         uint256 phaseEndTime,
@@ -858,12 +867,106 @@ contract HiddenOneCardPoker {
         }
     }
     
+    // Get all active games for spectating
+    function getActiveGames() external view returns (uint256[] memory) {
+        return activeGames;
+    }
+    
+    // Get all cards for spectating during SHOWDOWN or ENDED phases
+    function getRevealedCardsForSpectating(uint256 gameId) external view gameExists(gameId) returns (
+        address[] memory playerAddresses,
+        uint8[] memory cardValues,
+        uint8[] memory cardSuits
+    ) {
+        Game storage game = games[gameId];
+        
+        // Only allow viewing cards during showdown or when game is ended
+        require(game.state == GameLibrary.GameState.SHOWDOWN || game.state == GameLibrary.GameState.ENDED, "Cards not yet revealed");
+        
+        playerAddresses = new address[](game.players.length);
+        cardValues = new uint8[](game.players.length);
+        cardSuits = new uint8[](game.players.length);
+        
+        for (uint256 i = 0; i < game.players.length; i++) {
+            address player = game.players[i];
+            
+            // Skip folded players
+            if (game.playerInfo[player].hasFolded) {
+                playerAddresses[i] = player;
+                cardValues[i] = 0; // 0 indicates folded
+                cardSuits[i] = 0;
+                continue;
+            }
+            
+            uint8 cardIdx = game.playerInfo[player].cardIdx;
+            CardLibrary.Card memory playerCard = game.deck[cardIdx];
+            
+            playerAddresses[i] = player;
+            cardValues[i] = playerCard.value;
+            cardSuits[i] = playerCard.suit;
+        }
+        
+        return (playerAddresses, cardValues, cardSuits);
+    }
+    
+    // Get detailed game status for spectating
+    function getGameStateForSpectating(uint256 gameId) external view gameExists(gameId) returns (
+        GameLibrary.GameState state,
+        uint256 potAmount,
+        uint256 currentBet,
+        uint256 phaseEndTime,
+        uint256 playerCount,
+        uint256 activeCount,
+        address[] memory playerAddresses,
+        bool[] memory playerActiveBits,
+        bool[] memory playerFoldedBits,
+        uint256[] memory playerChipBalances,
+        uint256[] memory playerCurrentBets
+    ) {
+        Game storage game = games[gameId];
+        
+        // Get player addresses
+        playerAddresses = game.players;
+        
+        // Initialize player detail arrays
+        playerCount = playerAddresses.length;
+        playerActiveBits = new bool[](playerCount);
+        playerFoldedBits = new bool[](playerCount);
+        playerChipBalances = new uint256[](playerCount);
+        playerCurrentBets = new uint256[](playerCount);
+        
+        // Fill player details
+        for (uint256 i = 0; i < playerCount; i++) {
+            address player = playerAddresses[i];
+            Player storage playerData = game.playerInfo[player];
+            
+            playerActiveBits[i] = playerData.isActive;
+            playerFoldedBits[i] = playerData.hasFolded;
+            playerChipBalances[i] = playerData.chipBalance;
+            playerCurrentBets[i] = playerData.currentBet;
+        }
+        
+        return (
+            game.state,
+            game.potAmount,
+            game.currentBetAmount,
+            game.phaseEndTime,
+            playerCount,
+            game.activePlayerCount,
+            playerAddresses,
+            playerActiveBits,
+            playerFoldedBits,
+            playerChipBalances,
+            playerCurrentBets
+        );
+    }
+    
     // Function for a player to leave the game if it hasn't started
     function leaveGame(uint256 gameId) external gameExists(gameId) {
         Game storage game = games[gameId];
         
         require(game.playerInfo[msg.sender].isActive, "Not in this game");
-        require(game.state == GameState.REGISTRATION, "Game already started");
+        require(game.state == GameLibrary.GameState.REGISTRATION, "Game already started");
         
         // Find and remove the player
         for (uint256 i = 0; i < game.players.length; i++) {
@@ -890,12 +993,28 @@ contract HiddenOneCardPoker {
     function cleanup(uint256 gameId) external onlyKeeper gameExists(gameId) {
         Game storage game = games[gameId];
         
-        require(game.state == GameState.ENDED, "Game not ended");
+        require(game.state == GameLibrary.GameState.ENDED, "Game not ended");
         
         // Clear the player's current game tracking
         for (uint256 i = 0; i < game.players.length; i++) {
             address player = game.players[i];
             playerCurrentGame[player] = 0;
+        }
+        
+        // Remove from activeGames list
+        _removeFromActiveGames(gameId);
+        emit GameNoLongerSpectatable(gameId);
+    }
+    
+    // Helper function to remove a game from the activeGames array
+    function _removeFromActiveGames(uint256 gameId) private {
+        for (uint256 i = 0; i < activeGames.length; i++) {
+            if (activeGames[i] == gameId) {
+                // Replace with the last element and pop
+                activeGames[i] = activeGames[activeGames.length - 1];
+                activeGames.pop();
+                break;
+            }
         }
     }
 }
