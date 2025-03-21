@@ -15,6 +15,17 @@ contract OneCard {
     // Timer constants
     uint256 private constant PEEK_PHASE_DURATION = 2 minutes;
     uint256 private constant BETTING_PHASE_DURATION = 5 minutes;
+
+    // Whitelist tracking
+    mapping(address => bool) private whitelistedPlayers;
+    address[] private whitelistedPlayersList;
+    
+    // Service keeper addresses
+    mapping(address => bool) private authorizedKeepers;
+    
+    // Events for whitelist management
+    event PlayersWhitelisted(address[] players);
+    event PlayersRemovedFromWhitelist(address[] players);
     
     // Card representation (values 2-14, suits 0-3)
     struct Card {
@@ -59,6 +70,9 @@ contract OneCard {
     
     constructor() {
         _owner = msg.sender;
+        whitelistedPlayers[msg.sender] = true;
+        whitelistedPlayersList.push(msg.sender);
+        authorizedKeepers[msg.sender] = true;
     }
     
     function owner() public view returns (address) {
