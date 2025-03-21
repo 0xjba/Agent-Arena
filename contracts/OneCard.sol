@@ -23,6 +23,8 @@ contract OneCard {
     // Timer constants
     uint256 private constant PEEK_PHASE_DURATION = 2 minutes;
     uint256 private constant BETTING_PHASE_DURATION = 5 minutes;
+    // NEW: Buffer periods between phases
+    uint256 private constant PHASE_TRANSITION_BUFFER = 30 seconds;
 
     // Whitelist tracking - with efficient array access
     mapping(address => bool) private whitelistedPlayers;
@@ -40,6 +42,8 @@ contract OneCard {
         uint256 chipBalance;
         uint256 currentBet;
         uint256 lastActionTime;
+        // NEW: Action nonce for betting operations
+        uint256 actionNonce;
     }
     
     // Game structure - optimized to reduce storage usage
@@ -57,6 +61,12 @@ contract OneCard {
         uint256 currentBetAmount;
         address gameKeeper;
         uint256 phaseEndTime; // Removed phaseStartTime to save storage
+        // NEW: Added buffer period end time
+        uint256 bufferEndTime;
+        // NEW: Version tracking for game state
+        uint256 stateVersion;
+        // NEW: Cleanup safeguard
+        bool isCleanedUp;
     }
     
     // Game tracking
@@ -72,8 +82,9 @@ contract OneCard {
     event GameCreated(uint256 indexed gameId, address keeper);
     event PlayerJoined(uint256 indexed gameId, address indexed player);
     event PeekPhaseStarted(uint256 indexed gameId);
+    event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount);
+    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
     
@@ -90,7 +101,7 @@ contract OneCard {
     // Events for spectating
     event GameSpectatable(uint256 indexed gameId, GameLibrary.GameState state, uint256 playerCount);
     event GameNoLongerSpectatable(uint256 indexed gameId);
-    event GameStateUpdated(uint256 indexed gameId, GameLibrary.GameState state, uint256 potAmount, uint256 currentBet);
+    event GameStateUpdated(uint256 indexed gameId, GameLibrary.GameState state, uint256 potAmount, uint256 currentBet, uint256 stateVersion);
     
     constructor() {
         _owner = msg.sender;
@@ -118,6 +129,18 @@ contract OneCard {
     
     modifier activePlayer(uint256 gameId) {
         require(games[gameId].playerInfo[msg.sender].isActive, "Not active player");
+        _;
+    }
+    
+    // NEW: Check that game is not in buffer period
+    modifier notInBufferPeriod(uint256 gameId) {
+        require(block.timestamp >= games[gameId].bufferEndTime, "In buffer period");
+        _;
+    }
+    
+    // NEW: Check that a game hasn't been cleaned up
+    modifier notCleanedUp(uint256 gameId) {
+        require(!games[gameId].isCleanedUp, "Game already cleaned up");
         _;
     }
     
@@ -180,6 +203,11 @@ contract OneCard {
         games[gameId].revealedCardsBitmap = GameLibrary.clearRevealedCards();
     }
     
+    // NEW: Update game state version
+    function _incrementStateVersion(uint256 gameId) private {
+        unchecked { games[gameId].stateVersion++; }
+    }
+    
     // Keeper management
     function addKeeper(address keeper) external onlyOwner {
         authorizedKeepers[keeper] = true;
@@ -203,6 +231,8 @@ contract OneCard {
         newGame.state = GameLibrary.GameState.REGISTRATION;
         newGame.gameKeeper = msg.sender;
         newGame.activePlayerCount = 0;
+        newGame.stateVersion = 1; // Initialize version
+        newGame.isCleanedUp = false; // Game is not cleaned up
         
         // Add this game to the active games list for spectating
         activeGames.push(gameId);
@@ -238,6 +268,7 @@ contract OneCard {
         playerData.isActive = true;
         playerData.chipBalance = INITIAL_CHIPS;
         playerData.lastActionTime = block.timestamp;
+        playerData.actionNonce = 0; // Initialize action nonce
         
         // Track which game the player is in
         playerCurrentGame[player] = gameId;
@@ -249,7 +280,7 @@ contract OneCard {
     }
     
     // Any player can join the game (no whitelist requirement)
-    function joinGame(uint256 gameId) external gameExists(gameId) {
+    function joinGame(uint256 gameId) external gameExists(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         
         require(game.state == GameLibrary.GameState.REGISTRATION, "Not registration state");
@@ -262,6 +293,7 @@ contract OneCard {
         playerData.isActive = true;
         playerData.chipBalance = INITIAL_CHIPS;
         playerData.lastActionTime = block.timestamp;
+        playerData.actionNonce = 0; // Initialize action nonce
         
         // Track which game the player is in
         playerCurrentGame[msg.sender] = gameId;
@@ -273,7 +305,7 @@ contract OneCard {
     }
     
     // Authorized keepers can add players directly
-    function addPlayerToGame(uint256 gameId, address player) external onlyKeeper gameExists(gameId) {
+    function addPlayerToGame(uint256 gameId, address player) external onlyKeeper gameExists(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         
         require(game.state == GameLibrary.GameState.REGISTRATION, "Not registration state");
@@ -286,6 +318,7 @@ contract OneCard {
         playerData.isActive = true;
         playerData.chipBalance = INITIAL_CHIPS;
         playerData.lastActionTime = block.timestamp;
+        playerData.actionNonce = 0; // Initialize action nonce
         
         // Track which game the player is in
         playerCurrentGame[player] = gameId;
@@ -297,11 +330,20 @@ contract OneCard {
     }
     
     // Keeper starts the peek phase
-    function startPeekPhase(uint256 gameId) external onlyKeeper gameExists(gameId) {
+    function startPeekPhase(uint256 gameId) external onlyKeeper gameExists(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         
         require(game.state == GameLibrary.GameState.REGISTRATION, "Not registration state");
         require(game.players.length >= 2, "Need 2+ players");
+        
+        // Start buffer period before peek phase
+        game.bufferEndTime = block.timestamp + PHASE_TRANSITION_BUFFER;
+        
+        // Set timeframe for the peek phase
+        game.phaseEndTime = game.bufferEndTime + PEEK_PHASE_DURATION;
+        
+        // Move to peek phase
+        game.state = GameLibrary.GameState.PEEK_PHASE;
         
         // Initialize and shuffle the deck using Fisher-Yates algorithm
         _initializeDeck(gameId);
@@ -312,15 +354,17 @@ contract OneCard {
         // Clear any revealed cards bitmap
         _clearRevealedCards(gameId);
         
-        // Set timeframe for the peek phase
-        game.phaseEndTime = block.timestamp + PEEK_PHASE_DURATION;
+        // Update state version
+        _incrementStateVersion(gameId);
         
-        // Move to peek phase
-        game.state = GameLibrary.GameState.PEEK_PHASE;
+        // Emit buffer period start event
+        emit BufferPeriodStarted(gameId, GameLibrary.GameState.REGISTRATION, GameLibrary.GameState.PEEK_PHASE);
         
-        // Client will calculate endTime = block.timestamp + PEEK_PHASE_DURATION
+        // Emit state update
+        emit GameStateUpdated(gameId, GameLibrary.GameState.PEEK_PHASE, game.potAmount, game.currentBetAmount, game.stateVersion);
+        
+        // Client will calculate actual start time = game.bufferEndTime
         emit PeekPhaseStarted(gameId);
-        emit GameStateUpdated(gameId, GameLibrary.GameState.PEEK_PHASE, game.potAmount, game.currentBetAmount);
     }
     
     // Helper function to initialize the deck with Fisher-Yates shuffle using prevrandao
@@ -368,7 +412,7 @@ contract OneCard {
     }
     
     // Function for a player to peek at their card
-    function peekAtCard(uint256 gameId) external gameExists(gameId) activePlayer(gameId) {
+    function peekAtCard(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -382,6 +426,9 @@ contract OneCard {
         player.hasPeeked = true;
         player.lastActionTime = block.timestamp;
         
+        // Increment action nonce
+        unchecked { player.actionNonce++; }
+        
         // Get the player's card
         uint8 cardIdx = player.cardIdx;
         CardLibrary.Card memory playerCard = game.deck[cardIdx];
@@ -389,12 +436,12 @@ contract OneCard {
         // Use a private event to notify the player of their card
         emit CardRevealed(msg.sender, playerCard.value, playerCard.suit);
         
-        // Combined player action event
-        emit PlayerAction(gameId, msg.sender, "peek", PEEK_FEE);
+        // Combined player action event with nonce
+        emit PlayerAction(gameId, msg.sender, "peek", PEEK_FEE, player.actionNonce);
     }
     
-    // Function for the Monty Hall option - REVISED to show random cards
-    function useMontyHallOption(uint256 gameId) external gameExists(gameId) activePlayer(gameId) {
+    // Function for the Monty Hall option
+    function useMontyHallOption(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -408,13 +455,23 @@ contract OneCard {
         player.usedMontyHall = true;
         player.lastActionTime = block.timestamp;
         
+        // Increment action nonce
+        unchecked { player.actionNonce++; }
+        
         // Find random unassigned cards to reveal
         uint8[] memory revealedValues = new uint8[](MONTY_HALL_REVEALS);
         uint8[] memory revealedSuits = new uint8[](MONTY_HALL_REVEALS);
         uint8[] memory revealedIndices = new uint8[](MONTY_HALL_REVEALS);
         
-        // Find random cards to reveal instead of the lowest
+        // Find random cards to reveal
         _findRandomUnassignedCards(gameId, MONTY_HALL_REVEALS, revealedValues, revealedSuits, revealedIndices);
+        
+        // Explicit state check for Monty Hall
+        for (uint8 i = 0; i < MONTY_HALL_REVEALS; i++) {
+            require(revealedIndices[i] > 0, "Invalid Monty Hall card index");
+            require(!_isCardAssigned(gameId, revealedIndices[i]), "Monty Hall card already assigned");
+            require(!_isCardRevealed(gameId, revealedIndices[i]), "Monty Hall card already revealed");
+        }
         
         // Mark these cards as revealed
         for (uint8 i = 0; i < MONTY_HALL_REVEALS; i++) {
@@ -426,12 +483,12 @@ contract OneCard {
         // Emit the revealed cards to the player
         emit MontyHallCardsRevealed(msg.sender, revealedValues, revealedSuits);
         
-        // Combined player action event
-        emit PlayerAction(gameId, msg.sender, "montyHall", MONTY_HALL_FEE);
+        // Combined player action event with nonce
+        emit PlayerAction(gameId, msg.sender, "montyHall", MONTY_HALL_FEE, player.actionNonce);
     }
     
     // Function to decide whether to keep or swap card after Monty Hall
-    function montyHallDecision(uint256 gameId, bool swapCard) external gameExists(gameId) activePlayer(gameId) {
+    function montyHallDecision(uint256 gameId, bool swapCard) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -439,10 +496,13 @@ contract OneCard {
         require(block.timestamp < game.phaseEndTime, "Peek phase ended");
         require(player.usedMontyHall, "Monty Hall option not used");
         
+        // Increment action nonce
+        unchecked { player.actionNonce++; }
+        
         // If player decides not to swap, do nothing except record the action time
         if (!swapCard) {
             player.lastActionTime = block.timestamp;
-            emit PlayerAction(gameId, msg.sender, "keepCard", 0);
+            emit PlayerAction(gameId, msg.sender, "keepCard", 0, player.actionNonce);
             return;
         }
         
@@ -455,6 +515,11 @@ contract OneCard {
         
         // Get a new unassigned card that hasn't been revealed through Monty Hall
         uint8 newCardIdx = _getMontyHallSwapCard(gameId);
+        
+        // Explicit state check for card swap
+        require(newCardIdx > 0 && newCardIdx < STANDARD_DECK_SIZE, "Invalid new card index");
+        require(!_isCardAssigned(gameId, newCardIdx), "New card already assigned");
+        require(!_isCardRevealed(gameId, newCardIdx), "New card was already revealed");
         
         // Mark the new card as assigned and update player
         _assignCard(gameId, newCardIdx);
@@ -478,11 +543,11 @@ contract OneCard {
             emit CardRevealed(msg.sender, newCard.value, newCard.suit);
         }
         
-        // Combined player action event
-        emit PlayerAction(gameId, msg.sender, "swapCard", 0);
+        // Combined player action event with nonce
+        emit PlayerAction(gameId, msg.sender, "swapCard", 0, player.actionNonce);
     }
     
-    // REVISED: Helper to find random unassigned and unrevealed cards for Monty Hall
+    // Helper to find random unassigned and unrevealed cards for Monty Hall
     function _findRandomUnassignedCards(
         uint256 gameId, 
         uint8 count,
@@ -560,23 +625,36 @@ contract OneCard {
     }
     
     // Keeper ends peek phase and starts betting phase
-    function endPeekPhase(uint256 gameId) external onlyKeeper gameExists(gameId) {
+    function endPeekPhase(uint256 gameId) external onlyKeeper gameExists(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         
         require(game.state == GameLibrary.GameState.PEEK_PHASE, "Not peek phase");
         require(block.timestamp >= game.phaseEndTime, "Peek phase not finished");
         
+        // Start buffer period before betting phase
+        game.bufferEndTime = block.timestamp + PHASE_TRANSITION_BUFFER;
+        
+        // Set betting phase end time after buffer
+        game.phaseEndTime = game.bufferEndTime + BETTING_PHASE_DURATION;
+        
         // Start betting phase
         game.state = GameLibrary.GameState.BETTING;
-        game.phaseEndTime = block.timestamp + BETTING_PHASE_DURATION;
         
-        // Client will calculate endTime = block.timestamp + BETTING_PHASE_DURATION
+        // Update state version
+        _incrementStateVersion(gameId);
+        
+        // Emit buffer period start event
+        emit BufferPeriodStarted(gameId, GameLibrary.GameState.PEEK_PHASE, GameLibrary.GameState.BETTING);
+        
+        // Emit state update
+        emit GameStateUpdated(gameId, GameLibrary.GameState.BETTING, game.potAmount, game.currentBetAmount, game.stateVersion);
+        
+        // Client will calculate actual start time = game.bufferEndTime
         emit BettingPhaseStarted(gameId);
-        emit GameStateUpdated(gameId, GameLibrary.GameState.BETTING, game.potAmount, game.currentBetAmount);
     }
     
     // Function for players to place bets
-    function placeBet(uint256 gameId, uint256 betAmount) external gameExists(gameId) activePlayer(gameId) {
+    function placeBet(uint256 gameId, uint256 betAmount) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -593,6 +671,9 @@ contract OneCard {
         
         require(player.chipBalance >= betAmount, "Insufficient chips");
         
+        // Increment action nonce
+        unchecked { player.actionNonce++; }
+        
         // Place the bet
         unchecked {
             player.chipBalance -= betAmount;
@@ -606,14 +687,14 @@ contract OneCard {
             game.currentBetAmount = player.currentBet;
         }
         
-        // Unified player action event
-        emit PlayerAction(gameId, msg.sender, "bet", betAmount);
+        // Unified player action event with nonce
+        emit PlayerAction(gameId, msg.sender, "bet", betAmount, player.actionNonce);
         // Update spectators
-        emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount);
+        emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount, game.stateVersion);
     }
     
     // Function for players to fold
-    function fold(uint256 gameId) external gameExists(gameId) activePlayer(gameId) {
+    function fold(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -621,16 +702,19 @@ contract OneCard {
         require(block.timestamp < game.phaseEndTime, "Betting phase ended");
         require(!player.hasFolded, "Already folded");
         
+        // Increment action nonce
+        unchecked { player.actionNonce++; }
+        
         player.hasFolded = true;
         player.lastActionTime = block.timestamp;
         
         // Update active player count
         unchecked { game.activePlayerCount--; }
         
-        // Unified player action event
-        emit PlayerAction(gameId, msg.sender, "fold", 0);
+        // Unified player action event with nonce
+        emit PlayerAction(gameId, msg.sender, "fold", 0, player.actionNonce);
         // Update spectators
-        emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount);
+        emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount, game.stateVersion);
         
         // Check if only one player remains
         if (game.activePlayerCount == 1) {
@@ -656,7 +740,7 @@ contract OneCard {
     }
     
     // Keeper ends betting phase and moves to showdown
-    function endBettingPhase(uint256 gameId) external onlyKeeper gameExists(gameId) {
+    function endBettingPhase(uint256 gameId) external onlyKeeper gameExists(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         
         require(game.state == GameLibrary.GameState.BETTING, "Not betting phase");
@@ -669,10 +753,14 @@ contract OneCard {
     function _startShowdown(uint256 gameId) private {
         Game storage game = games[gameId];
         
+        // Update game state
         game.state = GameLibrary.GameState.SHOWDOWN;
         
+        // Update state version
+        _incrementStateVersion(gameId);
+        
         emit ShowdownStarted(gameId);
-        emit GameStateUpdated(gameId, GameLibrary.GameState.SHOWDOWN, game.potAmount, game.currentBetAmount);
+        emit GameStateUpdated(gameId, GameLibrary.GameState.SHOWDOWN, game.potAmount, game.currentBetAmount, game.stateVersion);
         
         // Determine winner during showdown
         _determineWinner(gameId);
@@ -740,16 +828,19 @@ contract OneCard {
         // Move game to ended state
         game.state = GameLibrary.GameState.ENDED;
         
+        // Update state version
+        _incrementStateVersion(gameId);
+        
         uint256 potAmount = game.potAmount;
         emit GameEnded(gameId, winner, potAmount);
-        emit GameStateUpdated(gameId, GameLibrary.GameState.ENDED, potAmount, game.currentBetAmount);
+        emit GameStateUpdated(gameId, GameLibrary.GameState.ENDED, potAmount, game.currentBetAmount, game.stateVersion);
         
         // Reset game state for cleanup
         game.potAmount = 0;
         game.currentBetAmount = 0;
     }
     
-// Check if all players have matched the current bet - for keeper service
+    // Check if all players have matched the current bet - for keeper service
     function checkAllPlayersMatched(uint256 gameId) external view gameExists(gameId) returns (bool) {
         Game storage game = games[gameId];
         
@@ -784,10 +875,13 @@ contract OneCard {
         uint256 potAmount,
         uint256 currentBet,
         uint256 phaseEndTime,
+        uint256 bufferEndTime,
         uint256 remainingTime,
         uint256 playerCount,
         uint256 activeCount,
-        address gameKeeper
+        address gameKeeper,
+        uint256 stateVersion,
+        bool isCleanedUp
     ) {
         Game storage game = games[gameId];
         uint256 remaining = 0;
@@ -801,10 +895,13 @@ contract OneCard {
             game.potAmount,
             game.currentBetAmount,
             game.phaseEndTime,
+            game.bufferEndTime,
             remaining,
             game.players.length,
             game.activePlayerCount,
-            game.gameKeeper
+            game.gameKeeper,
+            game.stateVersion,
+            game.isCleanedUp
         );
     }
     
@@ -816,7 +913,8 @@ contract OneCard {
         bool hasFolded,
         uint256 chipBalance,
         uint256 currentBet,
-        uint256 lastActionTime
+        uint256 lastActionTime,
+        uint256 actionNonce
     ) {
         Game storage game = games[gameId];
         Player storage playerData = game.playerInfo[player];
@@ -828,7 +926,8 @@ contract OneCard {
             playerData.hasFolded,
             playerData.chipBalance,
             playerData.currentBet,
-            playerData.lastActionTime
+            playerData.lastActionTime,
+            playerData.actionNonce
         );
     }
     
@@ -915,13 +1014,17 @@ contract OneCard {
         uint256 potAmount,
         uint256 currentBet,
         uint256 phaseEndTime,
+        uint256 bufferEndTime,
         uint256 playerCount,
         uint256 activeCount,
+        uint256 stateVersion,
+        bool isCleanedUp,
         address[] memory playerAddresses,
         bool[] memory playerActiveBits,
         bool[] memory playerFoldedBits,
         uint256[] memory playerChipBalances,
-        uint256[] memory playerCurrentBets
+        uint256[] memory playerCurrentBets,
+        uint256[] memory playerActionNonces
     ) {
         Game storage game = games[gameId];
         
@@ -934,6 +1037,7 @@ contract OneCard {
         playerFoldedBits = new bool[](playerCount);
         playerChipBalances = new uint256[](playerCount);
         playerCurrentBets = new uint256[](playerCount);
+        playerActionNonces = new uint256[](playerCount);
         
         // Fill player details
         for (uint256 i = 0; i < playerCount; i++) {
@@ -944,6 +1048,7 @@ contract OneCard {
             playerFoldedBits[i] = playerData.hasFolded;
             playerChipBalances[i] = playerData.chipBalance;
             playerCurrentBets[i] = playerData.currentBet;
+            playerActionNonces[i] = playerData.actionNonce;
         }
         
         return (
@@ -951,18 +1056,22 @@ contract OneCard {
             game.potAmount,
             game.currentBetAmount,
             game.phaseEndTime,
+            game.bufferEndTime,
             playerCount,
             game.activePlayerCount,
+            game.stateVersion,
+            game.isCleanedUp,
             playerAddresses,
             playerActiveBits,
             playerFoldedBits,
             playerChipBalances,
-            playerCurrentBets
+            playerCurrentBets,
+            playerActionNonces
         );
     }
     
     // Function for a player to leave the game if it hasn't started
-    function leaveGame(uint256 gameId) external gameExists(gameId) {
+    function leaveGame(uint256 gameId) external gameExists(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         
         require(game.playerInfo[msg.sender].isActive, "Not in this game");
@@ -985,12 +1094,12 @@ contract OneCard {
         delete game.playerInfo[msg.sender];
         playerCurrentGame[msg.sender] = 0;
         
-        // Emit player action for leaving
-        emit PlayerAction(gameId, msg.sender, "leave", 0);
+        // Emit player action for leaving (nonce is 0 as we've deleted the player)
+        emit PlayerAction(gameId, msg.sender, "leave", 0, 0);
     }
     
     // Function to clean up after a game
-    function cleanup(uint256 gameId) external onlyKeeper gameExists(gameId) {
+    function cleanup(uint256 gameId) external onlyKeeper gameExists(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         
         require(game.state == GameLibrary.GameState.ENDED, "Game not ended");
@@ -1001,9 +1110,16 @@ contract OneCard {
             playerCurrentGame[player] = 0;
         }
         
+        // Mark game as cleaned up
+        game.isCleanedUp = true;
+        
+        // Update state version
+        _incrementStateVersion(gameId);
+        
         // Remove from activeGames list
         _removeFromActiveGames(gameId);
         emit GameNoLongerSpectatable(gameId);
+        emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount, game.stateVersion);
     }
     
     // Helper function to remove a game from the activeGames array
