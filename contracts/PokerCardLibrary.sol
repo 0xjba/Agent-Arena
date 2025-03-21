@@ -28,13 +28,13 @@ library CardLibrary {
         return deck;
     }
     
-    // Fisher-Yates shuffle using prevrandao
+    // Fisher-Yates shuffle using difficulty as seed
     function shuffleDeck(Card[] memory deck) internal view returns (Card[] memory) {
-        uint256 prevrandao = block.prevrandao;
+        uint256 seed = block.difficulty;
         
         for (uint256 i = STANDARD_DECK_SIZE - 1; i > 0; i--) {
-            // Generate random index j such that 0 <= j <= i using PREVRANDAO
-            uint256 j = uint256(keccak256(abi.encodePacked(prevrandao, i))) % (i + 1);
+            // Generate random index j such that 0 <= j <= i
+            uint256 j = uint256(keccak256(abi.encodePacked(seed, i))) % (i + 1);
             
             // Swap elements at indices i and j
             Card memory temp = deck[i];

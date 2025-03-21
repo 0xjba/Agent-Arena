@@ -572,8 +572,8 @@ contract OneCard {
         // Ensure we don't try to reveal more cards than are available
         uint8 actualCount = eligibleCount < count ? uint8(eligibleCount) : count;
         
-        // Generate random indices using prevrandao for seed
-        uint256 seed = block.prevrandao;
+        // Generate random indices using difficulty for seed
+        uint256 seed = block.difficulty;
         
         for (uint8 i = 0; i < actualCount; i++) {
             // Get a random index from our eligible cards
@@ -620,7 +620,7 @@ contract OneCard {
         require(eligibleCount > 0, "No available cards for swap");
         
         // Select a random eligible card
-        uint16 randomIndex = uint16(uint256(keccak256(abi.encodePacked(block.prevrandao, block.timestamp))) % eligibleCount);
+        uint16 randomIndex = uint16(uint256(keccak256(abi.encodePacked(block.difficulty, block.timestamp))) % eligibleCount);
         return eligibleIndices[randomIndex];
     }
     
@@ -1008,8 +1008,8 @@ contract OneCard {
         return (playerAddresses, cardValues, cardSuits);
     }
     
-    // Get detailed game status for spectating
-    function getGameStateForSpectating(uint256 gameId) external view gameExists(gameId) returns (
+    // Get basic game information for spectating
+    function getGameBasicInfo(uint256 gameId) external view gameExists(gameId) returns (
         GameLibrary.GameState state,
         uint256 potAmount,
         uint256 currentBet,
@@ -1018,7 +1018,25 @@ contract OneCard {
         uint256 playerCount,
         uint256 activeCount,
         uint256 stateVersion,
-        bool isCleanedUp,
+        bool isCleanedUp
+    ) {
+        Game storage game = games[gameId];
+        
+        return (
+            game.state,
+            game.potAmount,
+            game.currentBetAmount,
+            game.phaseEndTime,
+            game.bufferEndTime,
+            game.players.length,
+            game.activePlayerCount,
+            game.stateVersion,
+            game.isCleanedUp
+        );
+    }
+    
+    // Get player details for spectating - separate function to avoid stack too deep
+    function getPlayersForSpectating(uint256 gameId) external view gameExists(gameId) returns (
         address[] memory playerAddresses,
         bool[] memory playerActiveBits,
         bool[] memory playerFoldedBits,
@@ -1027,12 +1045,12 @@ contract OneCard {
         uint256[] memory playerActionNonces
     ) {
         Game storage game = games[gameId];
+        uint256 playerCount = game.players.length;
         
         // Get player addresses
         playerAddresses = game.players;
         
         // Initialize player detail arrays
-        playerCount = playerAddresses.length;
         playerActiveBits = new bool[](playerCount);
         playerFoldedBits = new bool[](playerCount);
         playerChipBalances = new uint256[](playerCount);
@@ -1052,15 +1070,6 @@ contract OneCard {
         }
         
         return (
-            game.state,
-            game.potAmount,
-            game.currentBetAmount,
-            game.phaseEndTime,
-            game.bufferEndTime,
-            playerCount,
-            game.activePlayerCount,
-            game.stateVersion,
-            game.isCleanedUp,
             playerAddresses,
             playerActiveBits,
             playerFoldedBits,

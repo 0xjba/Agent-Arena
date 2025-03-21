@@ -5,7 +5,7 @@ import "./PokerCardLibrary.sol";
 import "./PokerGameLibrary.sol";
 
 // Interface for the main poker contract
-interface IHiddenOneCardPoker {
+interface IOneCard {
     // Game access functions
     function getActiveGames() external view returns (uint256[] memory);
     function getGameInfo(uint256 gameId) external view returns (
@@ -13,26 +13,37 @@ interface IHiddenOneCardPoker {
         uint256 potAmount,
         uint256 currentBet,
         uint256 phaseEndTime,
+        uint256 bufferEndTime,
         uint256 remainingTime,
         uint256 playerCount,
         uint256 activeCount,
-        address gameKeeper
+        address gameKeeper,
+        uint256 stateVersion,
+        bool isCleanedUp
     );
     
-    // Spectating specific functions
-    function getGameStateForSpectating(uint256 gameId) external view returns (
+    // Spectating specific functions - new split version
+    function getGameBasicInfo(uint256 gameId) external view returns (
         GameLibrary.GameState state,
         uint256 potAmount,
         uint256 currentBet,
         uint256 phaseEndTime,
+        uint256 bufferEndTime,
         uint256 playerCount,
         uint256 activeCount,
+        uint256 stateVersion,
+        bool isCleanedUp
+    );
+    
+    function getPlayersForSpectating(uint256 gameId) external view returns (
         address[] memory playerAddresses,
         bool[] memory playerActiveBits,
         bool[] memory playerFoldedBits,
         uint256[] memory playerChipBalances,
-        uint256[] memory playerCurrentBets
+        uint256[] memory playerCurrentBets,
+        uint256[] memory playerActionNonces
     );
+    
     function getRevealedCardsForSpectating(uint256 gameId) external view returns (
         address[] memory playerAddresses,
         uint8[] memory cardValues,
@@ -50,42 +61,45 @@ interface IHiddenOneCardPoker {
         bool hasFolded,
         uint256 chipBalance,
         uint256 currentBet,
-        uint256 lastActionTime
+        uint256 lastActionTime,
+        uint256 actionNonce
     );
     
     // Game state events that need to be listened to
     event GameCreated(uint256 indexed gameId, address keeper);
     event PlayerJoined(uint256 indexed gameId, address indexed player);
     event PeekPhaseStarted(uint256 indexed gameId);
+    event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount);
+    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
     
     // Spectator specific events
     event GameSpectatable(uint256 indexed gameId, GameLibrary.GameState state, uint256 playerCount);
     event GameNoLongerSpectatable(uint256 indexed gameId);
-    event GameStateUpdated(uint256 indexed gameId, GameLibrary.GameState state, uint256 potAmount, uint256 currentBet);
+    event GameStateUpdated(uint256 indexed gameId, GameLibrary.GameState state, uint256 potAmount, uint256 currentBet, uint256 stateVersion);
 }
 
 // SpectatorView contract - to separate view functions for spectating
 contract PokerSpectatorView {
-    IHiddenOneCardPoker private pokerContract;
+    IOneCard private pokerContract;
     
     // Mirror events from the main contract for easier frontend integration
     event GameCreated(uint256 indexed gameId, address keeper);
     event PlayerJoined(uint256 indexed gameId, address indexed player);
     event PeekPhaseStarted(uint256 indexed gameId);
+    event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount);
+    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
     event GameSpectatable(uint256 indexed gameId, GameLibrary.GameState state, uint256 playerCount);
     event GameNoLongerSpectatable(uint256 indexed gameId);
-    event GameStateUpdated(uint256 indexed gameId, GameLibrary.GameState state, uint256 potAmount, uint256 currentBet);
+    event GameStateUpdated(uint256 indexed gameId, GameLibrary.GameState state, uint256 potAmount, uint256 currentBet, uint256 stateVersion);
     
     constructor(address _pokerContractAddress) {
-        pokerContract = IHiddenOneCardPoker(_pokerContractAddress);
+        pokerContract = IOneCard(_pokerContractAddress);
     }
     
     // Basic game information functions
@@ -93,17 +107,118 @@ contract PokerSpectatorView {
         return pokerContract.getActiveGames();
     }
     
-    function getGameInfo(uint256 gameId) external view returns (
-        GameLibrary.GameState state,
-        uint256 potAmount,
-        uint256 currentBet,
-        uint256 phaseEndTime,
-        uint256 remainingTime,
-        uint256 playerCount,
-        uint256 activeCount,
-        address gameKeeper
-    ) {
-        return pokerContract.getGameInfo(gameId);
+    // Game state - minimal functions to avoid stack too deep issues
+    function getGamePhase(uint256 gameId) external view returns (GameLibrary.GameState) {
+        (GameLibrary.GameState state, , , , , , , , ) = pokerContract.getGameBasicInfo(gameId);
+        return state;
+    }
+    
+    function getPotInfo(uint256 gameId) external view returns (uint256 potAmount, uint256 currentBet) {
+        (
+            , // state
+            uint256 pot, 
+            uint256 bet, 
+            , // phaseEndTime 
+            , // bufferEndTime
+            , // playerCount
+            , // activeCount
+            , // stateVersion
+            // isCleanedUp
+        ) = pokerContract.getGameBasicInfo(gameId);
+        return (pot, bet);
+    }
+    
+    function getTimingInfo(uint256 gameId) external view returns (uint256 phaseEndTime, uint256 bufferEndTime) {
+        (
+            , // state
+            , // potAmount 
+            , // currentBet
+            uint256 phaseEnd, 
+            uint256 bufferEnd,
+            , // playerCount
+            , // activeCount
+            , // stateVersion
+            // isCleanedUp
+        ) = pokerContract.getGameBasicInfo(gameId);
+        return (phaseEnd, bufferEnd);
+    }
+    
+    function getGameVersion(uint256 gameId) external view returns (uint256 stateVersion, bool isCleanedUp) {
+        (
+            , // state
+            , // potAmount
+            , // currentBet
+            , // phaseEndTime
+            , // bufferEndTime
+            , // playerCount
+            , // activeCount
+            uint256 version,
+            bool cleaned
+        ) = pokerContract.getGameBasicInfo(gameId);
+        return (version, cleaned);
+    }
+    
+    function getPlayerCounts(uint256 gameId) external view returns (uint256 playerCount, uint256 activeCount) {
+        (
+            , // state
+            , // potAmount
+            , // currentBet
+            , // phaseEndTime
+            , // bufferEndTime
+            uint256 players,
+            uint256 active,
+            , // stateVersion
+            // isCleanedUp
+        ) = pokerContract.getGameBasicInfo(gameId);
+        return (players, active);
+    }
+    
+    function getGameKeeper(uint256 gameId) external view returns (address) {
+        (
+            , // state
+            , // potAmount
+            , // currentBet
+            , // phaseEndTime
+            , // bufferEndTime
+            , // remainingTime
+            , // playerCount
+            , // activeCount
+            address keeper,
+            , // stateVersion
+            // isCleanedUp
+        ) = pokerContract.getGameInfo(gameId);
+        return keeper;
+    }
+    
+    function getRemainingTime(uint256 gameId) external view returns (uint256) {
+        (
+            , // state
+            , // potAmount
+            , // currentBet
+            uint256 phaseEndTime,
+            , // bufferEndTime
+            , // playerCount
+            , // activeCount
+            , // stateVersion
+            // isCleanedUp
+        ) = pokerContract.getGameBasicInfo(gameId);
+        return block.timestamp < phaseEndTime ? phaseEndTime - block.timestamp : 0;
+    }
+    
+    // Super lightweight polling - just returns the version without any other data
+    function getStateVersionQuick(uint256 gameId) external view returns (uint256) {
+        (
+            , // state
+            , // potAmount
+            , // currentBet
+            , // phaseEndTime
+            , // bufferEndTime
+            , // playerCount
+            , // activeCount
+            uint256 version,
+              // isCleanedUp
+        ) = pokerContract.getGameBasicInfo(gameId);
+        return version;
     }
     
     // Player information
@@ -126,95 +241,35 @@ contract PokerSpectatorView {
         bool hasFolded,
         uint256 chipBalance,
         uint256 currentBet,
-        uint256 lastActionTime
+        uint256 lastActionTime,
+        uint256 actionNonce
     ) {
         return pokerContract.getPlayerInfo(gameId, player);
     }
     
-    // Get full game state for spectating
-    function getGameFullState(uint256 gameId) external view returns (
-        GameLibrary.GameState state,
-        uint256 potAmount,
-        uint256 currentBet,
-        uint256 phaseEndTime,
-        uint256 playerCount,
-        uint256 activeCount,
+    // Spectator data
+    function getSpectatorPlayerData(uint256 gameId) external view returns (
         address[] memory playerAddresses,
         bool[] memory playerActiveBits,
         bool[] memory playerFoldedBits,
         uint256[] memory playerChipBalances,
         uint256[] memory playerCurrentBets,
-        // Card data - empty for active games, filled for showdown/ended
+        uint256[] memory playerActionNonces
+    ) {
+        return pokerContract.getPlayersForSpectating(gameId);
+    }
+    
+    // Card data during showdown/ended phases
+    function areCardsViewable(uint256 gameId) external view returns (bool) {
+        (GameLibrary.GameState state, , , , , , , , ) = pokerContract.getGameBasicInfo(gameId);
+        return (state == GameLibrary.GameState.SHOWDOWN || state == GameLibrary.GameState.ENDED);
+    }
+    
+    function getSpectatorCardData(uint256 gameId) external view returns (
+        address[] memory playerAddresses,
         uint8[] memory cardValues,
         uint8[] memory cardSuits
     ) {
-        // Get game state
-        (
-            state,
-            potAmount,
-            currentBet,
-            phaseEndTime,
-            playerCount,
-            activeCount,
-            playerAddresses,
-            playerActiveBits,
-            playerFoldedBits,
-            playerChipBalances,
-            playerCurrentBets
-        ) = pokerContract.getGameStateForSpectating(gameId);
-        
-        // Initialize empty arrays for cards
-        cardValues = new uint8[](playerCount);
-        cardSuits = new uint8[](playerCount);
-        
-        // If game is in showdown or ended, also get the card info
-        if (state == GameLibrary.GameState.SHOWDOWN || state == GameLibrary.GameState.ENDED) {
-            address[] memory cardPlayerAddresses;
-            (
-                cardPlayerAddresses,
-                cardValues,
-                cardSuits
-            ) = pokerContract.getRevealedCardsForSpectating(gameId);
-            
-            // Ensure the card data is mapped to the correct players
-            if (cardPlayerAddresses.length > 0) {
-                uint8[] memory tempValues = new uint8[](playerCount);
-                uint8[] memory tempSuits = new uint8[](playerCount);
-                
-                // Match card data to players
-                for (uint256 i = 0; i < playerCount; i++) {
-                    address player = playerAddresses[i];
-                    
-                    // Find player in card data
-                    for (uint256 j = 0; j < cardPlayerAddresses.length; j++) {
-                        if (cardPlayerAddresses[j] == player) {
-                            tempValues[i] = cardValues[j];
-                            tempSuits[i] = cardSuits[j];
-                            break;
-                        }
-                    }
-                }
-                
-                // Update the arrays
-                cardValues = tempValues;
-                cardSuits = tempSuits;
-            }
-        }
-        
-        return (
-            state,
-            potAmount,
-            currentBet,
-            phaseEndTime,
-            playerCount,
-            activeCount,
-            playerAddresses,
-            playerActiveBits,
-            playerFoldedBits,
-            playerChipBalances,
-            playerCurrentBets,
-            cardValues,
-            cardSuits
-        );
+        return pokerContract.getRevealedCardsForSpectating(gameId);
     }
 }
