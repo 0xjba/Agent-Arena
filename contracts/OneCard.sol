@@ -4,12 +4,20 @@ pragma solidity ^0.8.0;
 import "./PokerCardLibrary.sol";
 import "./PokerGameLibrary.sol";
 
+interface ISpectatorBetting {
+    function openBetting(uint256 gameId) external;
+    function closeBetting(uint256 gameId) external;
+    function processResults(uint256 gameId, address winner) external;
+}
+
 contract OneCard {
     using CardLibrary for CardLibrary.Card[];
     using GameLibrary for uint256;
     
     // Simple ownership - contract deployer is the fixed owner/admin
     address private immutable _owner;
+
+    address public spectatorBettingContract;
     
     // Game constants
     uint8 private constant STANDARD_DECK_SIZE = 52; // Match the constant in CardLibrary
@@ -147,6 +155,11 @@ contract OneCard {
     function owner() public view returns (address) {
         return _owner;
     }
+
+    // Function to set the SpectatorBetting contract address (only owner can call)
+    function setSpectatorBettingContract(address _spectatorBettingContract) external onlyOwner {
+        spectatorBettingContract = _spectatorBettingContract;
+    }
     
     // Whitelist management - with efficient array operations
     function addMultipleToWhitelist(address[] calldata players) external onlyOwner {
@@ -239,6 +252,15 @@ contract OneCard {
         
         emit GameCreated(gameId, msg.sender);
         emit GameSpectatable(gameId, GameLibrary.GameState.REGISTRATION, 0);
+
+        // Open betting in the SpectatorBetting contract if it's set
+        if (spectatorBettingContract != address(0)) {
+            try ISpectatorBetting(spectatorBettingContract).openBetting(gameId) {
+                // Betting opened successfully
+            } catch {
+                // Betting failed to open, but we continue with the game
+            }
+        }
         
         // Auto-add whitelisted players to the game - efficient for 5 players
         for (uint256 i = 0; i < whitelistedPlayersList.length && i < MAX_PLAYERS; i++) {
@@ -335,6 +357,15 @@ contract OneCard {
         
         require(game.state == GameLibrary.GameState.REGISTRATION, "Not registration state");
         require(game.players.length >= 2, "Need 2+ players");
+
+        // Close betting in the SpectatorBetting contract if it's set
+        if (spectatorBettingContract != address(0)) {
+            try ISpectatorBetting(spectatorBettingContract).closeBetting(gameId) {
+                // Betting closed successfully
+            } catch {
+                // Betting failed to close, but we continue with the game
+            }
+        }
         
         // Start buffer period before peek phase
         game.bufferEndTime = block.timestamp + PHASE_TRANSITION_BUFFER;
@@ -835,6 +866,15 @@ contract OneCard {
         emit GameEnded(gameId, winner, potAmount);
         emit GameStateUpdated(gameId, GameLibrary.GameState.ENDED, potAmount, game.currentBetAmount, game.stateVersion);
         
+        // Process results in the SpectatorBetting contract if it's set
+        if (spectatorBettingContract != address(0)) {
+            try ISpectatorBetting(spectatorBettingContract).processResults(gameId, winner) {
+                // Results processed successfully
+            } catch {
+                // Results processing failed, but we continue with the game
+            }
+        }
+
         // Reset game state for cleanup
         game.potAmount = 0;
         game.currentBetAmount = 0;
