@@ -52,6 +52,8 @@ contract OneCard {
         uint256 lastActionTime;
         // NEW: Action nonce for betting operations
         uint256 actionNonce;
+        // AI agent rationalization for decision making
+        string lastActionRational;
     }
     
     // Game structure - optimized to reduce storage usage
@@ -92,7 +94,7 @@ contract OneCard {
     event PeekPhaseStarted(uint256 indexed gameId);
     event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce);
+    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce, string rational);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
     
@@ -443,7 +445,7 @@ contract OneCard {
     }
     
     // Function for a player to peek at their card
-    function peekAtCard(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function peekAtCard(uint256 gameId, string calldata rational) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -460,6 +462,9 @@ contract OneCard {
         // Increment action nonce
         unchecked { player.actionNonce++; }
         
+        // Store the rationalization
+        player.lastActionRational = rational;
+        
         // Get the player's card
         uint8 cardIdx = player.cardIdx;
         CardLibrary.Card memory playerCard = game.deck[cardIdx];
@@ -467,12 +472,12 @@ contract OneCard {
         // Use a private event to notify the player of their card
         emit CardRevealed(msg.sender, playerCard.value, playerCard.suit);
         
-        // Combined player action event with nonce
-        emit PlayerAction(gameId, msg.sender, "peek", PEEK_FEE, player.actionNonce);
+        // Combined player action event with nonce and rational
+        emit PlayerAction(gameId, msg.sender, "peek", PEEK_FEE, player.actionNonce, rational);
     }
     
     // Function for the Monty Hall option
-    function useMontyHallOption(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function useMontyHallOption(uint256 gameId, string calldata rational) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -488,6 +493,9 @@ contract OneCard {
         
         // Increment action nonce
         unchecked { player.actionNonce++; }
+        
+        // Store the rationalization
+        player.lastActionRational = rational;
         
         // Find random unassigned cards to reveal
         uint8[] memory revealedValues = new uint8[](MONTY_HALL_REVEALS);
@@ -514,12 +522,12 @@ contract OneCard {
         // Emit the revealed cards to the player
         emit MontyHallCardsRevealed(msg.sender, revealedValues, revealedSuits);
         
-        // Combined player action event with nonce
-        emit PlayerAction(gameId, msg.sender, "montyHall", MONTY_HALL_FEE, player.actionNonce);
+        // Combined player action event with nonce and rational
+        emit PlayerAction(gameId, msg.sender, "montyHall", MONTY_HALL_FEE, player.actionNonce, rational);
     }
     
     // Function to decide whether to keep or swap card after Monty Hall
-    function montyHallDecision(uint256 gameId, bool swapCard) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function montyHallDecision(uint256 gameId, bool swapCard, string calldata rational) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -530,10 +538,13 @@ contract OneCard {
         // Increment action nonce
         unchecked { player.actionNonce++; }
         
+        // Store the rationalization
+        player.lastActionRational = rational;
+        
         // If player decides not to swap, do nothing except record the action time
         if (!swapCard) {
             player.lastActionTime = block.timestamp;
-            emit PlayerAction(gameId, msg.sender, "keepCard", 0, player.actionNonce);
+            emit PlayerAction(gameId, msg.sender, "keepCard", 0, player.actionNonce, rational);
             return;
         }
         
@@ -574,8 +585,8 @@ contract OneCard {
             emit CardRevealed(msg.sender, newCard.value, newCard.suit);
         }
         
-        // Combined player action event with nonce
-        emit PlayerAction(gameId, msg.sender, "swapCard", 0, player.actionNonce);
+        // Combined player action event with nonce and rational
+        emit PlayerAction(gameId, msg.sender, "swapCard", 0, player.actionNonce, rational);
     }
     
     // Helper to find random unassigned and unrevealed cards for Monty Hall
@@ -685,7 +696,7 @@ contract OneCard {
     }
     
     // Function for players to place bets
-    function placeBet(uint256 gameId, uint256 betAmount) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function placeBet(uint256 gameId, uint256 betAmount, string calldata rational) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -705,6 +716,9 @@ contract OneCard {
         // Increment action nonce
         unchecked { player.actionNonce++; }
         
+        // Store the rationalization
+        player.lastActionRational = rational;
+        
         // Place the bet
         unchecked {
             player.chipBalance -= betAmount;
@@ -718,14 +732,14 @@ contract OneCard {
             game.currentBetAmount = player.currentBet;
         }
         
-        // Unified player action event with nonce
-        emit PlayerAction(gameId, msg.sender, "bet", betAmount, player.actionNonce);
+        // Unified player action event with nonce and rational
+        emit PlayerAction(gameId, msg.sender, "bet", betAmount, player.actionNonce, rational);
         // Update spectators
         emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount, game.stateVersion);
     }
     
     // Function for players to fold
-    function fold(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function fold(uint256 gameId, string calldata rational) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -736,14 +750,17 @@ contract OneCard {
         // Increment action nonce
         unchecked { player.actionNonce++; }
         
+        // Store the rationalization
+        player.lastActionRational = rational;
+        
         player.hasFolded = true;
         player.lastActionTime = block.timestamp;
         
         // Update active player count
         unchecked { game.activePlayerCount--; }
         
-        // Unified player action event with nonce
-        emit PlayerAction(gameId, msg.sender, "fold", 0, player.actionNonce);
+        // Unified player action event with nonce and rational
+        emit PlayerAction(gameId, msg.sender, "fold", 0, player.actionNonce, rational);
         // Update spectators
         emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount, game.stateVersion);
         
@@ -954,7 +971,8 @@ contract OneCard {
         uint256 chipBalance,
         uint256 currentBet,
         uint256 lastActionTime,
-        uint256 actionNonce
+        uint256 actionNonce,
+        string memory lastActionRational
     ) {
         Game storage game = games[gameId];
         Player storage playerData = game.playerInfo[player];
@@ -967,7 +985,8 @@ contract OneCard {
             playerData.chipBalance,
             playerData.currentBet,
             playerData.lastActionTime,
-            playerData.actionNonce
+            playerData.actionNonce,
+            playerData.lastActionRational
         );
     }
     
@@ -1082,7 +1101,8 @@ contract OneCard {
         bool[] memory playerFoldedBits,
         uint256[] memory playerChipBalances,
         uint256[] memory playerCurrentBets,
-        uint256[] memory playerActionNonces
+        uint256[] memory playerActionNonces,
+        string[] memory playerLastActionRationals
     ) {
         Game storage game = games[gameId];
         uint256 playerCount = game.players.length;
@@ -1096,6 +1116,7 @@ contract OneCard {
         playerChipBalances = new uint256[](playerCount);
         playerCurrentBets = new uint256[](playerCount);
         playerActionNonces = new uint256[](playerCount);
+        playerLastActionRationals = new string[](playerCount);
         
         // Fill player details
         for (uint256 i = 0; i < playerCount; i++) {
@@ -1107,6 +1128,7 @@ contract OneCard {
             playerChipBalances[i] = playerData.chipBalance;
             playerCurrentBets[i] = playerData.currentBet;
             playerActionNonces[i] = playerData.actionNonce;
+            playerLastActionRationals[i] = playerData.lastActionRational;
         }
         
         return (
@@ -1115,12 +1137,13 @@ contract OneCard {
             playerFoldedBits,
             playerChipBalances,
             playerCurrentBets,
-            playerActionNonces
+            playerActionNonces,
+            playerLastActionRationals
         );
     }
     
     // Function for a player to leave the game if it hasn't started
-    function leaveGame(uint256 gameId) external gameExists(gameId) notCleanedUp(gameId) {
+    function leaveGame(uint256 gameId, string calldata rational) external gameExists(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         
         require(game.playerInfo[msg.sender].isActive, "Not in this game");
@@ -1144,7 +1167,7 @@ contract OneCard {
         playerCurrentGame[msg.sender] = 0;
         
         // Emit player action for leaving (nonce is 0 as we've deleted the player)
-        emit PlayerAction(gameId, msg.sender, "leave", 0, 0);
+        emit PlayerAction(gameId, msg.sender, "leave", 0, 0, rational);
     }
     
     // Function to clean up after a game

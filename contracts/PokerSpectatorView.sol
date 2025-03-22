@@ -41,7 +41,8 @@ interface IOneCard {
         bool[] memory playerFoldedBits,
         uint256[] memory playerChipBalances,
         uint256[] memory playerCurrentBets,
-        uint256[] memory playerActionNonces
+        uint256[] memory playerActionNonces,
+        string[] memory playerLastActionRationals
     );
     
     function getRevealedCardsForSpectating(uint256 gameId) external view returns (
@@ -62,7 +63,8 @@ interface IOneCard {
         uint256 chipBalance,
         uint256 currentBet,
         uint256 lastActionTime,
-        uint256 actionNonce
+        uint256 actionNonce,
+        string memory lastActionRational
     );
     
     // Game state events that need to be listened to
@@ -71,7 +73,7 @@ interface IOneCard {
     event PeekPhaseStarted(uint256 indexed gameId);
     event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce);
+    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce, string rational);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
     
@@ -91,7 +93,7 @@ contract PokerSpectatorView {
     event PeekPhaseStarted(uint256 indexed gameId);
     event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce);
+    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce, string rational);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
     event GameSpectatable(uint256 indexed gameId, GameLibrary.GameState state, uint256 playerCount);
@@ -242,7 +244,8 @@ contract PokerSpectatorView {
         uint256 chipBalance,
         uint256 currentBet,
         uint256 lastActionTime,
-        uint256 actionNonce
+        uint256 actionNonce,
+        string memory lastActionRational
     ) {
         return pokerContract.getPlayerInfo(gameId, player);
     }
@@ -254,7 +257,8 @@ contract PokerSpectatorView {
         bool[] memory playerFoldedBits,
         uint256[] memory playerChipBalances,
         uint256[] memory playerCurrentBets,
-        uint256[] memory playerActionNonces
+        uint256[] memory playerActionNonces,
+        string[] memory playerLastActionRationals
     ) {
         return pokerContract.getPlayersForSpectating(gameId);
     }
