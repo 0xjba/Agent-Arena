@@ -2,8 +2,8 @@
   "_format": "hh-sol-cache-2",
   "files": {
     "/Users/0xjba/agent-arena/contracts/OneCard.sol": {
-      "lastModificationDate": 1742566636615,
-      "contentHash": "809774245495814ab42541310c22614c",
+      "lastModificationDate": 1742573536313,
+      "contentHash": "025ddd60ae9a35df9b5883e43a22d8aa",
       "sourceName": "contracts/OneCard.sol",
       "solcConfig": {
         "version": "0.8.0",
@@ -36,6 +36,7 @@
         "^0.8.0"
       ],
       "artifacts": [
+        "ISpectatorBetting",
         "OneCard"
       ]
     },
@@ -146,6 +147,43 @@
       "artifacts": [
         "IOneCard",
         "PokerSpectatorView"
+      ]
+    },
+    "/Users/0xjba/agent-arena/contracts/SpectatorBetting.sol": {
+      "lastModificationDate": 1742573312020,
+      "contentHash": "61ab36dbf9184948d2643e9bfd90aac5",
+      "sourceName": "contracts/SpectatorBetting.sol",
+      "solcConfig": {
+        "version": "0.8.0",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "./PokerGameLibrary.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.0"
+      ],
+      "artifacts": [
+        "SpectatorBetting"
       ]
     }
   }
