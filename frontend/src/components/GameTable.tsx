@@ -30,7 +30,11 @@ const EMPTY_POSITIONS: PlayerPosition[] = Array(5).fill(null).map((_, i) => ({
 }));
 
 const CARD_SUITS = ['♠', '♥', '♦', '♣'];
-const CARD_VALUES = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+// Maps card values from contract (2-14) to display values
+const CARD_VALUES = {
+  2: '2', 3: '3', 4: '4', 5: '5', 6: '6', 7: '7', 8: '8', 9: '9', 10: '10', 
+  11: 'J', 12: 'Q', 13: 'K', 14: 'A'
+};
 
 const TABLE_GRADIENT = 'radial-gradient(circle at center, #1a472a 0%, #0f2b19 100%)';
 
@@ -141,7 +145,13 @@ export function GameTable({ gameId, playerAddress, onLeave }: GameTableProps) {
     const cleanup = setupEventListeners(gameId, {
       onCardPeeked: (player, value, suit) => {
         if (player.toLowerCase() === playerAddress.toLowerCase()) {
-          const card = { value, suit };
+          // Convert values to numbers as they might come as BigNumber
+          const cardValue = typeof value === 'object' ? value.toNumber() : Number(value);
+          const cardSuit = typeof suit === 'object' ? suit.toNumber() : Number(suit);
+          
+          console.log(`Card peeked: Value=${cardValue} (${CARD_VALUES[cardValue]}), Suit=${cardSuit} (${CARD_SUITS[cardSuit]})`);
+          
+          const card = { value: cardValue, suit: cardSuit };
           savePeekedCard(player, card);
           setPositions(prev => prev.map(pos => 
             pos.address?.toLowerCase() === player.toLowerCase()
@@ -194,18 +204,70 @@ export function GameTable({ gameId, playerAddress, onLeave }: GameTableProps) {
         toast.success('Showdown phase! All cards will be revealed.', { duration: 10000 });
         pollGameState();
       },
-      onGameEnded: (gameId, winner, potAmount) => {
+      onCardRevealed: (gameId, player, value, suit) => {
+        // Convert values to numbers as they might come as BigNumber
+        const cardValue = typeof value === 'object' ? value.toNumber() : Number(value);
+        const cardSuit = typeof suit === 'object' ? suit.toNumber() : Number(suit);
+        
+        console.log(`Card revealed: Player=${player}, Value=${cardValue} (${CARD_VALUES[cardValue]}), Suit=${cardSuit} (${CARD_SUITS[cardSuit]})`);
+        
+        setPositions(prev => prev.map(pos => 
+          pos.address?.toLowerCase() === player.toLowerCase()
+            ? { ...pos, card: { value: cardValue, suit: cardSuit } }
+            : pos
+        ));
+      },
+      onGameEnded: async (gameId, winner, potAmount) => {
+        // Save winner information
         setWinner(winner);
         saveWinner(winner);
         setShowdown(true);
+        
+        // Mark winner in positions
         setPositions(prev => prev.map(pos => ({
           ...pos,
           isWinner: pos.address?.toLowerCase() === winner.toLowerCase()
         })));
-        toast.success(`Game ended! Winner: ${winner.slice(0, 6)}...${winner.slice(-4)} won ${potAmount} chips!`, { 
+        
+        // Display toast for winner
+        toast.success(`Game ended! ${winner.slice(0, 6)}...${winner.slice(-4)} won ${potAmount} chips!`, { 
           duration: 10000,
           icon: '🏆'
         });
+        
+        // Get revealed cards after a short delay to ensure contract state is updated
+        setTimeout(async () => {
+          try {
+            const revealedCards = await getRevealedCards(gameId);
+            console.log("Game ended - Revealed cards:", revealedCards);
+            
+            if (revealedCards && revealedCards.players && revealedCards.players.length > 0) {
+              const cardMap = {};
+              for (let i = 0; i < revealedCards.players.length; i++) {
+                const player = revealedCards.players[i];
+                const value = Number(revealedCards.values[i]);
+                const suit = Number(revealedCards.suits[i]);
+                cardMap[player.toLowerCase()] = { value, suit };
+              }
+              
+              // Update positions with revealed cards
+              setPositions(prev => prev.map(pos => {
+                if (pos.address && cardMap[pos.address.toLowerCase()]) {
+                  return { 
+                    ...pos, 
+                    card: cardMap[pos.address.toLowerCase()],
+                    isWinner: pos.address?.toLowerCase() === winner.toLowerCase()
+                  };
+                }
+                return pos;
+              }));
+            }
+          } catch (error) {
+            console.error("Error fetching revealed cards after game end:", error);
+          }
+        }, 2000);
+        
+        // Also poll game state to get updated info
         pollGameState();
       }
     });
@@ -227,8 +289,37 @@ export function GameTable({ gameId, playerAddress, onLeave }: GameTableProps) {
         getPlayers(gameId)
       ]);
 
+      // Check if game is in showdown or ended state
       if (info.state === GameState.SHOWDOWN || info.state === GameState.ENDED) {
         setShowdown(true);
+        
+        // Try to get revealed cards if in showdown/ended state
+        try {
+          const revealedCards = await getRevealedCards(gameId);
+          console.log("Revealed cards:", revealedCards);
+          
+          // Update positions with revealed cards
+          if (revealedCards && revealedCards.players && revealedCards.players.length > 0) {
+            const cardMap = {};
+            for (let i = 0; i < revealedCards.players.length; i++) {
+              const player = revealedCards.players[i];
+              const value = Number(revealedCards.values[i]);
+              const suit = Number(revealedCards.suits[i]);
+              cardMap[player.toLowerCase()] = { value, suit };
+              console.log(`Revealed card for ${player}: Value=${value} (${CARD_VALUES[value]}), Suit=${suit} (${CARD_SUITS[suit]})`);
+            }
+            
+            // Update positions with revealed cards
+            setPositions(prev => prev.map(pos => {
+              if (pos.address && cardMap[pos.address.toLowerCase()]) {
+                return { ...pos, card: cardMap[pos.address.toLowerCase()] };
+              }
+              return pos;
+            }));
+          }
+        } catch (error) {
+          console.error("Error fetching revealed cards:", error);
+        }
       }
 
       const playerInfos = await Promise.all(
@@ -256,6 +347,18 @@ export function GameTable({ gameId, playerAddress, onLeave }: GameTableProps) {
       const currentPlayer = playerInfos.find(p => p.address.toLowerCase() === playerAddress.toLowerCase());
       if (currentPlayer && currentPlayer.info.currentBet > 0) {
         setHasPlacedBet(true);
+      }
+
+      // Display winner toast if game just ended and we have winner data
+      const prevState = gameInfo?.state;
+      if (prevState !== GameState.ENDED && info.state === GameState.ENDED && storedWinner) {
+        const winnerPlayer = playerInfos.find(p => p.address.toLowerCase() === storedWinner.toLowerCase());
+        const winnerName = storedWinner ? `${storedWinner.slice(0, 6)}...${storedWinner.slice(-4)}` : 'Unknown';
+        
+        toast.success(`Game ended! ${winnerName} won ${info.potAmount} chips!`, { 
+          duration: 10000,
+          icon: '🏆'
+        });
       }
 
       setGameInfo(info);
@@ -420,7 +523,7 @@ export function GameTable({ gameId, playerAddress, onLeave }: GameTableProps) {
               <div className={`text-2xl font-bold ${
                 position.card?.suit === 1 || position.card?.suit === 2 ? 'text-red-600' : 'text-black'
               }`}>
-                {position.card && `${CARD_VALUES[position.card.value]}${CARD_SUITS[position.card.suit]}`}
+                {position.card && `${CARD_VALUES[position.card.value] || '?'}${CARD_SUITS[position.card.suit] || ''}`}
               </div>
             ) : (
               <div className="w-12 h-12 rounded-full border-2 border-gray-600/30" />
@@ -534,6 +637,7 @@ export function GameTable({ gameId, playerAddress, onLeave }: GameTableProps) {
         );
 
       case GameState.SHOWDOWN:
+      case GameState.ENDED:
         return (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -544,6 +648,12 @@ export function GameTable({ gameId, playerAddress, onLeave }: GameTableProps) {
             <span className="text-xl font-bold text-yellow-400">
               Winner: {winner ? `${winner.slice(0, 6)}...${winner.slice(-4)}` : 'Determining...'}
             </span>
+            {gameInfo.potAmount > 0 && (
+              <span className="ml-2 flex items-center gap-1">
+                <Coins className="w-5 h-5 text-yellow-400" />
+                <span className="text-lg font-bold text-yellow-400">{gameInfo.potAmount} chips</span>
+              </span>
+            )}
           </motion.div>
         );
 

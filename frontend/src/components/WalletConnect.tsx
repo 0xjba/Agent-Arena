@@ -13,9 +13,15 @@ export function WalletConnect({ onConnect }: WalletConnectProps) {
       const { address } = await connectWallet();
       onConnect(address);
       toast.success('Wallet connected successfully!');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to connect wallet:', error);
-      toast.error('Failed to connect wallet. Please make sure MetaMask is installed and try again.');
+      
+      // Check if it's a TEN Network error
+      if (error.message && error.message.includes('TEN Network')) {
+        toast.error(error.message);
+      } else {
+        toast.error('Failed to connect wallet. Please make sure MetaMask is installed and try again.');
+      }
     }
   };
 

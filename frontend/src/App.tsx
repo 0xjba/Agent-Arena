@@ -15,8 +15,9 @@ function App() {
       await connectWallet();
       setAddress(walletAddress);
       setIsContractInitialized(true);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error initializing contract:', error);
+      // Error already handled in WalletConnect component
     }
   };
 
@@ -42,8 +43,11 @@ function App() {
       <main className="container mx-auto px-4 py-8">
         {!address ? (
           <div className="text-center py-20">
-            <h2 className="text-3xl font-bold mb-4">Welcome to OneCard Poker</h2>
-            <p className="text-gray-400 mb-8">Connect your wallet to start playing</p>
+            <h2 className="text-3xl font-bold mb-4">OneCard Poker: TEE powered Poker</h2>
+            <p className="text-gray-400 mb-4">Connect your wallet to start playing</p>
+            <p className="text-gray-400 mb-8">
+              Visit <a href="https://testnet.ten.xyz/" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">TEN Gateway</a> &amp; add TEN network to play this game
+            </p>
           </div>
         ) : !currentGameId ? (
           <GameLobby 

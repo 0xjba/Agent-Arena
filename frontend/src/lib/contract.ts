@@ -268,6 +268,29 @@ export async function connectWallet() {
 
   provider = new ethers.providers.Web3Provider(window.ethereum);
   await provider.send("eth_requestAccounts", []);
+  
+  // Check if current chain is TEN Network (chain ID 443)
+  const network = await provider.getNetwork();
+  if (network.chainId !== 443) {
+    try {
+      // Try to switch to TEN Network
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: '0x1BB' }], // 443 in hex
+      });
+    } catch (error: any) {
+      // This error code means the chain has not been added to MetaMask
+      if (error.code === 4902) {
+        throw new Error("TEN Network not found in your wallet. Please visit https://testnet.ten.xyz/ to add TEN Network to your wallet.");
+      } else {
+        throw new Error("Failed to switch to TEN Network. Please visit https://testnet.ten.xyz/ to add TEN Network to your wallet.");
+      }
+    }
+    
+    // Refresh provider after chain switch
+    provider = new ethers.providers.Web3Provider(window.ethereum);
+  }
+  
   const signer = provider.getSigner();
   contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
   isInitialized = true;
