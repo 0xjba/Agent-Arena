@@ -11,7 +11,8 @@ const fs = require('fs');
 const path = require('path');
 
 // Constants
-const POLLING_INTERVAL = 15000; // 15 seconds
+const POLLING_INTERVAL = 5000; // 5 seconds - Frequent polling for active games
+const GAME_DISCOVERY_INTERVAL = 10000; // 10 seconds - Separate interval for discovering new games
 const DEBUG = true;
 
 // Environment variables
@@ -83,8 +84,11 @@ async function initializeKeeper(contractAddress) {
   // Start listening for events
   setupEventListeners();
   
-  // Start monitoring active games
+  // Start monitoring active games with frequent polling
   setInterval(monitorActiveGames, POLLING_INTERVAL);
+  
+  // Start discovery process to find any missed games
+  setInterval(discoverNewGames, GAME_DISCOVERY_INTERVAL);
 }
 
 /**
@@ -94,7 +98,14 @@ function setupEventListeners() {
   // Listen for GameCreated events
   oneCardContract.on('GameCreated', async (gameId, keeper, creator, event) => {
     console.log(`New game created: ${gameId.toString()}`);
-    // We don't add to activeGames yet as the game is still in PRE_GAME state
+    
+    // Add to a pending games list - we'll start monitoring it right away
+    // even though it's still in PRE_GAME state
+    console.log(`Starting to monitor game ${gameId.toString()} in PRE_GAME state`);
+    activeGames.set(gameId.toString(), {
+      state: GameState.PRE_GAME,
+      createdAt: Date.now()
+    });
   });
 
   // Listen for PeekPhaseStarted events
@@ -149,6 +160,69 @@ function setupEventListeners() {
 }
 
 /**
+ * Discover any new games that may have been created that we missed the events for
+ */
+async function discoverNewGames() {
+  try {
+    // Get the current game ID from the contract
+    const currentGameId = await oneCardContract.currentGameId();
+    
+    // Log the current max game ID
+    logDebug(`Current max game ID from contract: ${currentGameId}`);
+    
+    // Check for games we're not tracking
+    for (let i = 1; i <= currentGameId; i++) {
+      const gameId = i.toString();
+      
+      // Skip games we're already tracking
+      if (activeGames.has(gameId)) {
+        continue;
+      }
+      
+      try {
+        // Try to get game info - will fail if game doesn't exist
+        const gameInfo = await oneCardContract.getGameInfo(gameId);
+        
+        // If we get here, the game exists and we're not tracking it
+        console.log(`Discovered missed game ${gameId} in state ${GameState[gameInfo.state]}`);
+        
+        // If the game is not ended and not cleaned up, add it to our tracking
+        if (gameInfo.state !== GameState.ENDED && !gameInfo.isCleanedUp) {
+          // Add the game to our tracking with the appropriate state
+          if (gameInfo.state === GameState.PEEK_PHASE || gameInfo.state === GameState.BETTING) {
+            // For timed phases, set up local timers correctly
+            const localTimestamp = Date.now();
+            const remainingTime = gameInfo.remainingTime.toNumber() * 1000; // Convert to milliseconds
+            
+            activeGames.set(gameId, {
+              state: gameInfo.state,
+              localEndTime: localTimestamp + remainingTime
+            });
+            
+            console.log(`Started tracking game ${gameId} in ${GameState[gameInfo.state]} state, ending in ${Math.floor(remainingTime/1000)} seconds`);
+          } else {
+            // For other states (PRE_GAME), just track the state
+            activeGames.set(gameId, {
+              state: gameInfo.state,
+              createdAt: Date.now()
+            });
+            
+            console.log(`Started tracking game ${gameId} in ${GameState[gameInfo.state]} state`);
+          }
+        }
+      } catch (error) {
+        // This can happen if the game doesn't exist
+        if (!error.message.includes("Game not found")) {
+          console.error(`Error checking game ${gameId}:`, error.message);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error discovering new games:", error.message);
+  }
+}
+
+/**
  * Monitor active games and trigger phase transitions
  */
 async function monitorActiveGames() {
@@ -166,11 +240,28 @@ async function monitorActiveGames() {
         
         // Update our local tracking
         gameData.state = gameInfo.state;
+        
+        // If game transitioned to an active phase, set up timers
+        if (gameInfo.state === GameState.PEEK_PHASE || gameInfo.state === GameState.BETTING) {
+          const localTimestamp = Date.now();
+          const remainingTime = gameInfo.remainingTime.toNumber() * 1000; // Convert to milliseconds
+          
+          gameData.localEndTime = localTimestamp + remainingTime;
+          
+          console.log(`Updated game ${gameId} to ${GameState[gameInfo.state]} state, ending in ${Math.floor(remainingTime/1000)} seconds`);
+        }
+        
         activeGames.set(gameId, gameData);
       }
       
       // Handle each state
       switch (gameData.state) {
+        case GameState.PRE_GAME:
+          // We're monitoring games from creation, no action needed in PRE_GAME state
+          // The state will change when startGame is called and PeekPhaseStarted event is emitted
+          logDebug(`Game ${gameId} is in PRE_GAME state, waiting for game to start`);
+          break;
+          
         case GameState.PEEK_PHASE:
           // Check if peek phase has ended based on local time
           if (currentTime >= gameData.localEndTime) {
