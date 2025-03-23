@@ -11,6 +11,8 @@ dist/
 
 frontend/UI-DESIGN-SPEC.md
 
+keeper-calls.js
+
 ### Environment Variables ###
 .env
 .env.local

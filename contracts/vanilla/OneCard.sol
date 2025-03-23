@@ -22,7 +22,6 @@ contract OneCard {
     // Timer constants - public for transparency
     uint256 public constant PEEK_PHASE_DURATION = 2 minutes;
     uint256 public constant BETTING_PHASE_DURATION = 5 minutes;
-    uint256 public constant PHASE_TRANSITION_BUFFER = 30 seconds;
 
     // No whitelist in vanilla version
     
@@ -57,7 +56,6 @@ contract OneCard {
         address gameKeeper;        // Service keeper that manages game transitions
         address creator;           // Player who created the game
         uint256 phaseEndTime;
-        uint256 bufferEndTime;
         bool isCleanedUp;
     }
     
@@ -69,20 +67,19 @@ contract OneCard {
     // Service keeper addresses
     mapping(address => bool) private authorizedKeepers;
     
-    // Basic game events
-    event GameCreated(uint256 indexed gameId, address keeper);
+    // Basic game events - consolidated game creation event
+    event GameCreated(uint256 indexed gameId, address keeper, address creator);
     event PlayerJoined(uint256 indexed gameId, address player);
     event PeekPhaseStarted(uint256 indexed gameId);
-    event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address winner, uint256 potAmount);
     
-    // Game created by a player
-    event GameCreatedByPlayer(uint256 indexed gameId, address indexed creator);
-    
-    // Private notifications for cards (only visible to the player)
-    event CardPeeked(address indexed player, uint8 value, uint8 suit);
+    // Card-related events
+    event CardDealt(uint256 indexed gameId, address indexed player);
+    event CardSwapped(uint256 indexed gameId, address player); // Public event, no indexed for player
+    event CardPeeked(address indexed player, uint8 value, uint8 suit); // Private to the player
+    event PlayerPeeked(uint256 indexed gameId, address player); // Public notification without revealing the card
     
     // Private action events (only visible to the player who performed them)
     event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount);
@@ -112,13 +109,13 @@ contract OneCard {
         _;
     }
     
-    modifier notInBufferPeriod(uint256 gameId) {
-        require(block.timestamp >= games[gameId].bufferEndTime, "In buffer period");
+    modifier notCleanedUp(uint256 gameId) {
+        require(!games[gameId].isCleanedUp, "Game already cleaned up");
         _;
     }
     
-    modifier notCleanedUp(uint256 gameId) {
-        require(!games[gameId].isCleanedUp, "Game already cleaned up");
+    modifier onlyCreator(uint256 gameId) {
+        require(msg.sender == games[gameId].creator, "Not game creator");
         _;
     }
     
@@ -173,8 +170,8 @@ contract OneCard {
         newGame.activePlayerCount = 0;
         newGame.isCleanedUp = false;
         
-        emit GameCreated(gameId, _owner);
-        emit GameCreatedByPlayer(gameId, msg.sender);
+        // Emit consolidated game creation event
+        emit GameCreated(gameId, _owner, msg.sender);
         
         // Auto-add creator to their own game
         _addPlayerToGame(gameId, msg.sender);
@@ -234,18 +231,14 @@ contract OneCard {
     // We don't need addPlayerToGame since players use joinGame directly
     
     // Game creator starts the game (peek phase)
-    function startGame(uint256 gameId) external gameExists(gameId) notCleanedUp(gameId) {
+    function startGame(uint256 gameId) external gameExists(gameId) notCleanedUp(gameId) onlyCreator(gameId) {
         Game storage game = games[gameId];
         
-        require(msg.sender == game.creator, "Only creator can start game");
         require(game.state == GameLibrary.GameState.PRE_GAME, "Game has already started");
         require(game.players.length >= 2, "Need 2+ players");
         
-        // Start buffer period before peek phase
-        game.bufferEndTime = block.timestamp + PHASE_TRANSITION_BUFFER;
-        
-        // Set timeframe for the peek phase
-        game.phaseEndTime = game.bufferEndTime + PEEK_PHASE_DURATION;
+        // Set timeframe for the peek phase - no buffer period
+        game.phaseEndTime = block.timestamp + PEEK_PHASE_DURATION;
         
         // Move to peek phase
         game.state = GameLibrary.GameState.PEEK_PHASE;
@@ -256,39 +249,7 @@ contract OneCard {
         // Deal cards to players
         _dealCards(gameId);
         
-        // Emit buffer period start event
-        emit BufferPeriodStarted(gameId, GameLibrary.GameState.PRE_GAME, GameLibrary.GameState.PEEK_PHASE);
-        
-        // Client will calculate actual start time = game.bufferEndTime
-        emit PeekPhaseStarted(gameId);
-    }
-    
-    // Keeper manages phase transitions
-    function startPeekPhase(uint256 gameId) external onlyKeeper gameExists(gameId) notCleanedUp(gameId) {
-        Game storage game = games[gameId];
-        
-        require(game.state == GameLibrary.GameState.PRE_GAME, "Game has already started");
-        require(game.players.length >= 2, "Need 2+ players");
-        
-        // Start buffer period before peek phase
-        game.bufferEndTime = block.timestamp + PHASE_TRANSITION_BUFFER;
-        
-        // Set timeframe for the peek phase
-        game.phaseEndTime = game.bufferEndTime + PEEK_PHASE_DURATION;
-        
-        // Move to peek phase
-        game.state = GameLibrary.GameState.PEEK_PHASE;
-        
-        // Initialize and shuffle the deck using Fisher-Yates algorithm
-        _initializeDeck(gameId);
-        
-        // Deal cards to players
-        _dealCards(gameId);
-        
-        // Emit buffer period start event
-        emit BufferPeriodStarted(gameId, GameLibrary.GameState.PRE_GAME, GameLibrary.GameState.PEEK_PHASE);
-        
-        // Client will calculate actual start time = game.bufferEndTime
+        // Emit peek phase started event
         emit PeekPhaseStarted(gameId);
     }
     
@@ -333,11 +294,14 @@ contract OneCard {
             uint8 cardIdx = uint8(i);
             game.playerInfo[player].cardIdx = cardIdx;
             _assignCard(gameId, cardIdx);
+            
+            // Emit event to notify player they've been dealt a card (without revealing which card)
+            emit CardDealt(gameId, player);
         }
     }
     
     // Function for a player to peek at their card
-    function peekAtCard(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function peekAtCard(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -358,15 +322,18 @@ contract OneCard {
         uint8 cardIdx = player.cardIdx;
         CardLibrary.Card memory playerCard = game.deck[cardIdx];
         
-        // Use a private event to notify the player of their card
+        // Private event to notify only the player of their card
         emit CardPeeked(msg.sender, playerCard.value, playerCard.suit);
+        
+        // Public event to notify all players that this player has peeked
+        emit PlayerPeeked(gameId, msg.sender);
         
         // Private player action confirmation
         emit PlayerAction(gameId, msg.sender, "peek", PEEK_FEE);
     }
     
     // Function to swap card - only available if player has peeked
-    function swapCard(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function swapCard(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -399,11 +366,11 @@ contract OneCard {
         _assignCard(gameId, newCardIdx);
         player.cardIdx = newCardIdx;
         
-        // Get the new card info
-        CardLibrary.Card memory newCard = game.deck[newCardIdx];
+        // Do NOT reveal the new card to the player - they've already used their peek
+        // Player won't be able to see what card they received after swapping
         
-        // Privately reveal the new card to the player
-        emit CardPeeked(msg.sender, newCard.value, newCard.suit);
+        // Public event to notify all players that this player has swapped their card
+        emit CardSwapped(gameId, msg.sender);
         
         // Private player action confirmation
         emit PlayerAction(gameId, msg.sender, "swap", SWAP_FEE);
@@ -438,24 +405,18 @@ contract OneCard {
         require(game.state == GameLibrary.GameState.PEEK_PHASE, "Not peek phase");
         require(block.timestamp >= game.phaseEndTime, "Peek phase not finished");
         
-        // Start buffer period before betting phase
-        game.bufferEndTime = block.timestamp + PHASE_TRANSITION_BUFFER;
-        
-        // Set betting phase end time after buffer
-        game.phaseEndTime = game.bufferEndTime + BETTING_PHASE_DURATION;
+        // Set betting phase end time - no buffer period
+        game.phaseEndTime = block.timestamp + BETTING_PHASE_DURATION;
         
         // Start betting phase
         game.state = GameLibrary.GameState.BETTING;
         
-        // Emit buffer period start event
-        emit BufferPeriodStarted(gameId, GameLibrary.GameState.PEEK_PHASE, GameLibrary.GameState.BETTING);
-        
-        // Client will calculate actual start time = game.bufferEndTime
+        // Emit betting phase started
         emit BettingPhaseStarted(gameId);
     }
     
     // Function for players to place bets - only allowed once per player during betting phase
-    function placeBet(uint256 gameId, uint256 betAmount) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function placeBet(uint256 gameId, uint256 betAmount) external gameExists(gameId) activePlayer(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -493,7 +454,7 @@ contract OneCard {
     }
     
     // Function for players to fold
-    function fold(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    function fold(uint256 gameId) external gameExists(gameId) activePlayer(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
@@ -672,17 +633,17 @@ contract OneCard {
         return games[gameId].activePlayerCount;
     }
     
-    // Get basic game information
+    // Get basic game information - UI can poll this to get the latest public game data
     function getGameInfo(uint256 gameId) external view gameExists(gameId) returns (
         GameLibrary.GameState state,
         uint256 potAmount,
         uint256 currentBet,
         uint256 phaseEndTime,
-        uint256 bufferEndTime,
         uint256 remainingTime,
         uint256 playerCount,
         uint256 activeCount,
-        address creator
+        address creator,
+        bool isCleanedUp
     ) {
         Game storage game = games[gameId];
         uint256 remaining = 0;
@@ -696,11 +657,11 @@ contract OneCard {
             game.potAmount,
             game.currentBetAmount,
             game.phaseEndTime,
-            game.bufferEndTime,
             remaining,
             game.players.length,
             game.activePlayerCount,
-            game.creator
+            game.creator,
+            game.isCleanedUp
         );
     }
     
@@ -716,13 +677,13 @@ contract OneCard {
         Game storage game = games[gameId];
         Player storage playerData = game.playerInfo[player];
         
-        // Only the player or a keeper can see the full player info
-        if (msg.sender != player && !authorizedKeepers[msg.sender]) {
-            // Return only public information if not the player
+        // Only the player should see their private info - keepers don't need to see player info
+        if (msg.sender != player) {
+            // Return public and limited information if not the player
             return (
                 playerData.isActive,
-                false, // Don't reveal if they've peeked
-                false, // Don't reveal if they've swapped
+                playerData.hasPeeked, // Reveal if they've peeked - this is public
+                playerData.hasSwappedCard, // Reveal if they've swapped - this is public
                 playerData.hasFolded,
                 playerData.chipBalance,
                 playerData.currentBet
