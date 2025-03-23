@@ -4,6 +4,19 @@ pragma solidity ^0.8.0;
 import "./PokerCardLibrary.sol";
 import "./PokerGameLibrary.sol";
 
+/**
+ * @title OneCard Poker Game for TEN Network
+ * @notice TEN Network is powered by Trusted Execution Environments (TEEs) which provide
+ * encrypted private shared states for blockchain applications. This contract
+ * leverages TEN's capabilities for a private and fair poker game.
+ *
+ * @dev This is the main contract for the OneCard poker game, which utilizes TEN Network's
+ * privacy features:
+ * 1. Private Card Information: Player cards remain hidden using TEN's encrypted state
+ * 2. Secure RNG: Card shuffling uses TEN's secure random number generation
+ * 3. Selective Card Reveals: Cards are only revealed to appropriate players
+ * 4. Tamper-proof Game Logic: Game rules are enforced within TEE
+ */
 contract OneCard {
     using CardLibrary for CardLibrary.Card[];
     using GameLibrary for uint256;
@@ -11,7 +24,9 @@ contract OneCard {
     // Simple ownership - contract deployer is the fixed owner/admin
     address private immutable _owner;
     
-    // Game constants - public for transparency
+    /**
+     * @dev Game constants - public for transparency
+     */
     uint8 public constant STANDARD_DECK_SIZE = 52; // Standard 52-card deck
     uint8 public constant MAX_PLAYERS = 5; // Maximum 5 players per game
     uint256 public constant INITIAL_CHIPS = 25;    
@@ -19,13 +34,18 @@ contract OneCard {
     uint256 public constant SWAP_FEE = 7;         
     uint256 public constant MINIMUM_BET = 1;
     
-    // Timer constants - public for transparency
+    /**
+     * @dev Phase duration constants - public for transparency
+     */
     uint256 public constant PEEK_PHASE_DURATION = 2 minutes;
     uint256 public constant BETTING_PHASE_DURATION = 5 minutes;
 
     // No whitelist in vanilla version
     
-    // Player state - optimized packing (booleans together)
+    /**
+     * @dev Player structure with optimized packing (booleans together in a single slot)
+     * TEN Network's privacy features ensure this data remains encrypted and private
+     */
     struct Player {
         // Pack these booleans into a single storage slot
         bool isActive;
@@ -36,21 +56,24 @@ contract OneCard {
         uint8 cardIdx;           // Index of the player's card in the deck array
         uint256 chipBalance;
         uint256 currentBet;
-        uint256 lastActionTime;  // Timestamp of player's last action (for timeout enforcement)
-        // Action nonce for betting operations
+        uint256 lastActionTime;  // Timestamp of player's last action
+        // Action nonce for betting operations - prevents replay attacks
         uint256 actionNonce;
     }
     
-    // Game structure - optimized to reduce storage usage
+    /**
+     * @dev Game structure - optimized for gas efficiency and storage usage
+     * TEN Network ensures the privacy of sensitive game state variables
+     */
     struct Game {
         uint256 gameId;
         GameLibrary.GameState state;
         address[] players;
         uint256 activePlayerCount; // Track active players to avoid recomputation
         mapping(address => Player) playerInfo;
-        CardLibrary.Card[] deck;
-        // Card assignment tracking - using bitmap for efficiency
-        uint256 cardAssignmentBitmap; // Uses a single storage slot for all 52 cards
+        CardLibrary.Card[] deck;   // Secured by TEN's encrypted state
+        // Card assignment tracking - using bitmap for efficiency (1 slot for 52 cards)
+        uint256 cardAssignmentBitmap;
         uint256 potAmount;
         uint256 currentBetAmount;
         address gameKeeper;        // Service keeper that manages game transitions
@@ -59,15 +82,22 @@ contract OneCard {
         bool isCleanedUp;
     }
     
-    // Game tracking
+    /**
+     * @dev Game tracking state variables
+     */
     uint256 public currentGameId;
     mapping(uint256 => Game) private games;
     mapping(address => uint256) public playerCurrentGame;
     
-    // Service keeper addresses
+    /**
+     * @dev Service keeper authorization mapping
+     */
     mapping(address => bool) private authorizedKeepers;
     
-    // Basic game events - consolidated game creation event
+    /**
+     * @dev Game state transition events
+     * TEN Network ensures these events are visible to appropriate participants
+     */
     event GameCreated(uint256 indexed gameId, address keeper, address creator);
     event PlayerJoined(uint256 indexed gameId, address player);
     event PeekPhaseStarted(uint256 indexed gameId);
@@ -75,88 +105,168 @@ contract OneCard {
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address winner, uint256 potAmount);
     
-    // Card-related events
+    /**
+     * @dev Card-related events
+     * TEN Network's privacy features ensure these events are only visible to appropriate participants:
+     * - Public events are visible to everyone
+     * - Private events (indexed by player address) are only visible to that specific player
+     */
     event CardDealt(uint256 indexed gameId, address indexed player);
-    event CardSwapped(uint256 indexed gameId, address player); // Public event, no indexed for player
+    event CardSwapped(uint256 indexed gameId, address player); // Public event
     event CardPeeked(address indexed player, uint8 value, uint8 suit); // Private to the player
     event PlayerPeeked(uint256 indexed gameId, address player); // Public notification without revealing the card
     event CardRevealed(uint256 indexed gameId, address player, uint8 value, uint8 suit); // Public card reveal at showdown
     
-    // Private action events (only visible to the player who performed them)
+    /**
+     * @dev Private action events (only visible to the player who performed them)
+     * TEN Network's TEE ensures these events remain private
+     */
     event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount);
     
+    /**
+     * @dev Constructor sets the contract owner as the first authorized keeper
+     */
     constructor() {
         _owner = msg.sender;
         authorizedKeepers[msg.sender] = true;
     }
     
+    /**
+     * @dev Restricts function access to the contract owner
+     */
     modifier onlyOwner() {
         require(msg.sender == _owner, "Not owner");
         _;
     }
     
+    /**
+     * @dev Restricts function access to authorized keeper addresses
+     * Keepers are responsible for managing game phase transitions
+     */
     modifier onlyKeeper() {
         require(authorizedKeepers[msg.sender], "Not keeper");
         _;
     }
     
+    /**
+     * @dev Ensures a game with the given ID exists
+     */
     modifier gameExists(uint256 gameId) {
         require(games[gameId].gameId == gameId, "Game not found");
         _;
     }
     
+    /**
+     * @dev Ensures the caller is an active player in the specified game
+     */
     modifier activePlayer(uint256 gameId) {
         require(games[gameId].playerInfo[msg.sender].isActive, "Not active player");
         _;
     }
     
+    /**
+     * @dev Ensures the game has not been cleaned up yet
+     */
     modifier notCleanedUp(uint256 gameId) {
         require(!games[gameId].isCleanedUp, "Game already cleaned up");
         _;
     }
     
+    /**
+     * @dev Restricts function access to the game creator
+     */
     modifier onlyCreator(uint256 gameId) {
         require(msg.sender == games[gameId].creator, "Not game creator");
         _;
     }
     
+    /**
+     * @dev Returns the address of the contract owner
+     * @return The owner address
+     */
     function owner() public view returns (address) {
         return _owner;
     }
 
     // No whitelist functions needed for vanilla version
     
-    // Bitmap operations for card assignments using GameLibrary
+    /**
+     * @dev Bitmap operations for gas-efficient card assignment tracking
+     * These internal functions utilize the GameLibrary for bitmap manipulation
+     * TEN Network's privacy features ensure these operations remain secure
+     */
+    
+    /**
+     * @dev Checks if a card is assigned to any player
+     * @param gameId The ID of the game
+     * @param cardIdx The index of the card to check
+     * @return True if the card is assigned, false otherwise
+     */
     function _isCardAssigned(uint256 gameId, uint8 cardIdx) private view returns (bool) {
         return GameLibrary.isCardAssigned(games[gameId].cardAssignmentBitmap, cardIdx);
     }
     
+    /**
+     * @dev Marks a card as assigned to a player
+     * @param gameId The ID of the game
+     * @param cardIdx The index of the card to assign
+     */
     function _assignCard(uint256 gameId, uint8 cardIdx) private {
         games[gameId].cardAssignmentBitmap = GameLibrary.assignCard(games[gameId].cardAssignmentBitmap, cardIdx);
     }
     
+    /**
+     * @dev Unassigns a card from a player
+     * @param gameId The ID of the game
+     * @param cardIdx The index of the card to unassign
+     */
     function _unassignCard(uint256 gameId, uint8 cardIdx) private {
         games[gameId].cardAssignmentBitmap = GameLibrary.unassignCard(games[gameId].cardAssignmentBitmap, cardIdx);
     }
     
+    /**
+     * @dev Clears all card assignments for a game
+     * @param gameId The ID of the game
+     */
     function _clearCardAssignments(uint256 gameId) private {
         games[gameId].cardAssignmentBitmap = GameLibrary.clearCardAssignments();
     }
     
-    // Keeper management
+    /**
+     * @dev Keeper management functions
+     * Keepers are responsible for managing game state transitions
+     */
+    
+    /**
+     * @notice Adds a new keeper address
+     * @dev Only the contract owner can add keepers
+     * @param keeper The address to add as a keeper
+     */
     function addKeeper(address keeper) external onlyOwner {
         authorizedKeepers[keeper] = true;
     }
     
+    /**
+     * @notice Removes a keeper address
+     * @dev Only the contract owner can remove keepers
+     * @param keeper The address to remove as a keeper
+     */
     function removeKeeper(address keeper) external onlyOwner {
         authorizedKeepers[keeper] = false;
     }
     
+    /**
+     * @notice Checks if an address is an authorized keeper
+     * @param keeper The address to check
+     * @return True if the address is a keeper, false otherwise
+     */
     function isKeeper(address keeper) public view returns (bool) {
         return authorizedKeepers[keeper];
     }
     
-    // Game creation - any player can create a game
+    /**
+     * @dev Game lifecycle functions
+     */
     function createGame() external returns (uint256) {
         require(playerCurrentGame[msg.sender] == 0, "Already in a game");
         

@@ -1,9 +1,9 @@
 {
   "network": "ten",
-  "timestamp": "2025-03-23T15:37:24.425Z",
+  "timestamp": "2025-03-23T16:38:49.583Z",
   "contracts": {
-    "CardLibrary": "0x985ac7f8AA9D1151ff605Fb5b8987d6cCDb1fd48",
-    "GameLibrary": "0xf3b762Ec72335812A923042387C93b4f7A4267dA",
-    "OneCard": "0x95972662df92A48d8bc55fb56CB56216D01EDEdF"
+    "CardLibrary": "0xEB8b93B669a6dbC16F289ba3Ead3566E941a526D",
+    "GameLibrary": "0x18226C30a732c7e411dc9A906907dF5FDFC3be18",
+    "OneCard": "0xCDAE7a3Bf38c05b510290012E1752246dA2f55f1"
   }
 }
