@@ -80,6 +80,7 @@ contract OneCard {
     event CardSwapped(uint256 indexed gameId, address player); // Public event, no indexed for player
     event CardPeeked(address indexed player, uint8 value, uint8 suit); // Private to the player
     event PlayerPeeked(uint256 indexed gameId, address player); // Public notification without revealing the card
+    event CardRevealed(uint256 indexed gameId, address player, uint8 value, uint8 suit); // Public card reveal at showdown
     
     // Private action events (only visible to the player who performed them)
     event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount);
@@ -484,6 +485,21 @@ contract OneCard {
             // Capture pot amount before resetting
             uint256 potAmount = game.potAmount;
             
+            // Reveal all remaining cards since the game is ending
+            for (uint256 i = 0; i < game.players.length; i++) {
+                address player = game.players[i];
+                
+                // Skip folded players
+                if (game.playerInfo[player].hasFolded) continue;
+                
+                // Reveal card publicly
+                uint8 cardIdx = game.playerInfo[player].cardIdx;
+                CardLibrary.Card memory playerCard = game.deck[cardIdx];
+                
+                // Emit a public event revealing this card to everyone
+                emit CardRevealed(gameId, player, playerCard.value, playerCard.suit);
+            }
+            
             // Move game to ended state
             game.state = GameLibrary.GameState.ENDED;
             
@@ -540,17 +556,20 @@ contract OneCard {
         
         address winner = _findHighestCardPlayer(gameId);
         
-        // Reveal all cards
+        // Reveal all cards publicly at showdown
         for (uint256 i = 0; i < game.players.length; i++) {
             address player = game.players[i];
             
             // Skip folded players
             if (game.playerInfo[player].hasFolded) continue;
             
-            // Reveal card to all players
+            // Reveal card privately to the player (historical behavior)
             uint8 cardIdx = game.playerInfo[player].cardIdx;
             CardLibrary.Card memory playerCard = game.deck[cardIdx];
             emit CardPeeked(player, playerCard.value, playerCard.suit);
+            
+            // Also emit a public event revealing this card to everyone
+            emit CardRevealed(gameId, player, playerCard.value, playerCard.suit);
         }
         
         // Award chips directly to the winner
@@ -700,6 +719,54 @@ contract OneCard {
         );
     }
     
+    // Function to get all revealed cards at showdown or game end
+    function getRevealedCards(uint256 gameId) external view gameExists(gameId) returns (
+        address[] memory players,
+        uint8[] memory values,
+        uint8[] memory suits
+    ) {
+        Game storage game = games[gameId];
+        
+        // Only allow viewing cards during showdown or when game is ended
+        require(game.state == GameLibrary.GameState.SHOWDOWN || game.state == GameLibrary.GameState.ENDED, 
+                "Cards not yet revealed");
+        
+        // Count non-folded players to determine array size
+        uint256 activeCount = 0;
+        for (uint256 i = 0; i < game.players.length; i++) {
+            if (!game.playerInfo[game.players[i]].hasFolded) {
+                activeCount++;
+            }
+        }
+        
+        // Initialize arrays
+        players = new address[](activeCount);
+        values = new uint8[](activeCount);
+        suits = new uint8[](activeCount);
+        
+        // Fill arrays with card information
+        uint256 index = 0;
+        for (uint256 i = 0; i < game.players.length; i++) {
+            address player = game.players[i];
+            
+            // Skip folded players
+            if (game.playerInfo[player].hasFolded) continue;
+            
+            // Get card details
+            uint8 cardIdx = game.playerInfo[player].cardIdx;
+            CardLibrary.Card memory card = game.deck[cardIdx];
+            
+            // Add to arrays
+            players[index] = player;
+            values[index] = card.value;
+            suits[index] = card.suit;
+            
+            index++;
+        }
+        
+        return (players, values, suits);
+    }
+    
     // Get all players in a single call
     function getPlayers(uint256 gameId) external view gameExists(gameId) returns (
         address[] memory players
@@ -764,6 +831,31 @@ contract OneCard {
         
         // Private player action confirmation
         emit PlayerAction(gameId, msg.sender, "leave", 0);
+        
+        // If this was the last player to leave, clean up the game
+        if (game.players.length == 0) {
+            _cleanupEmptyGame(gameId);
+        }
+    }
+    
+    // Internal function to clean up an empty game
+    function _cleanupEmptyGame(uint256 gameId) internal {
+        Game storage game = games[gameId];
+        
+        // Make sure there are no players
+        require(game.players.length == 0, "Game still has players");
+        
+        // Clear deck and other data
+        delete game.deck;
+        
+        // Mark as cleaned up
+        game.isCleanedUp = true;
+        
+        // Emit event to notify that this game is no longer available
+        emit GameEnded(gameId, address(0), 0);
+        
+        // Log specific event for cleanup
+        emit PlayerAction(gameId, msg.sender, "cleanup_empty", 0);
     }
     
     // Function to clean up after a game

@@ -1,0 +1,9 @@
+{
+  "network": "ten",
+  "timestamp": "2025-03-23T15:37:24.425Z",
+  "contracts": {
+    "CardLibrary": "0x985ac7f8AA9D1151ff605Fb5b8987d6cCDb1fd48",
+    "GameLibrary": "0xf3b762Ec72335812A923042387C93b4f7A4267dA",
+    "OneCard": "0x95972662df92A48d8bc55fb56CB56216D01EDEdF"
+  }
+}
