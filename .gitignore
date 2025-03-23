@@ -9,6 +9,8 @@ pnpm-debug.log*
 build/
 dist/
 
+frontend/UI-DESIGN-SPEC.md
+
 ### Environment Variables ###
 .env
 .env.local
@@ -46,3 +48,4 @@ coverage/
 *.tsbuildinfo
 
 CLAUDE.md
+idea.md

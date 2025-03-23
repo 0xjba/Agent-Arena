@@ -38,9 +38,9 @@ contract SpectatorBetting {
     // Events
     event BettingOpened(uint256 indexed gameId);
     event BettingClosed(uint256 indexed gameId);
-    event BetPlaced(uint256 indexed gameId, address indexed bettor, address indexed playerBetOn, uint256 amount);
-    event ResultsProcessed(uint256 indexed gameId, address indexed winner);
-    event WinningsClaimed(uint256 indexed gameId, address indexed bettor, uint256 amount);
+    event BetPlaced(uint256 indexed gameId, address bettor, address indexed playerBetOn, uint256 amount);
+    event ResultsProcessed(uint256 indexed gameId, address winner);
+    event WinningsClaimed(uint256 indexed gameId, address bettor, uint256 amount);
     
     constructor(address _oneCardContract) {
         oneCardContract = _oneCardContract;

@@ -24,9 +24,8 @@ contract OneCard {
     uint8 private constant MAX_PLAYERS = 5; // Maximum 5 players per game
     uint256 private constant INITIAL_CHIPS = 25;    
     uint256 private constant PEEK_FEE = 5;
-    uint256 private constant MONTY_HALL_FEE = 7;         
+    uint256 private constant SWAP_FEE = 7;         
     uint256 private constant MINIMUM_BET = 1;
-    uint8 private constant MONTY_HALL_REVEALS = 2; // Number of cards to reveal in Monty Hall option
     
     // Timer constants
     uint256 private constant PEEK_PHASE_DURATION = 2 minutes;
@@ -35,15 +34,15 @@ contract OneCard {
     uint256 private constant PHASE_TRANSITION_BUFFER = 30 seconds;
 
     // Whitelist tracking - with efficient array access
-    mapping(address => bool) private whitelistedPlayers;
-    address[] private whitelistedPlayersList;
+    mapping(address => bool) public whitelistedPlayers;
+    address[] public whitelistedPlayersList;
     
     // Player state - optimized packing (booleans together)
     struct Player {
         // Pack these booleans into a single storage slot
         bool isActive;
         bool hasPeeked;
-        bool usedMontyHall;
+        bool hasSwappedCard;
         bool hasFolded;
         // These fit in another slot
         uint8 cardIdx;
@@ -64,9 +63,8 @@ contract OneCard {
         uint256 activePlayerCount; // Track active players to avoid recomputation
         mapping(address => Player) playerInfo;
         CardLibrary.Card[] deck;
-        // Card assignment and revealed card tracking - using bitmaps for efficiency
+        // Card assignment tracking - using bitmap for efficiency
         uint256 cardAssignmentBitmap; // Uses a single storage slot for all 52 cards
-        uint256 revealedCardsBitmap;  // Track cards revealed through Monty Hall
         uint256 potAmount;
         uint256 currentBetAmount;
         address gameKeeper;
@@ -80,33 +78,41 @@ contract OneCard {
     }
     
     // Game tracking
-    uint256 private currentGameId;
+    uint256 public currentGameId;
     mapping(uint256 => Game) private games;
-    mapping(address => uint256) private playerCurrentGame;
-    uint256[] private activeGames; // Array to track active games for spectating
+    mapping(address => uint256) public playerCurrentGame;
+    uint256[] public activeGames; // Array to track active games for spectating
     
     // Service keeper addresses
     mapping(address => bool) private authorizedKeepers;
     
     // Events - streamlined
     event GameCreated(uint256 indexed gameId, address keeper);
-    event PlayerJoined(uint256 indexed gameId, address indexed player);
+    event PlayerJoined(uint256 indexed gameId, address player);
     event PeekPhaseStarted(uint256 indexed gameId);
     event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce, string rational);
+    
+    // Public event for action type (without details) - visible to all
+    event PlayerActionType(uint256 indexed gameId, address player, string actionType);
+    
+    // Private event for detailed action (only visible to the player)
+    event PlayerActionDetails(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce, string rational);
+    
     event ShowdownStarted(uint256 indexed gameId);
-    event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
+    event GameEnded(uint256 indexed gameId, address winner, uint256 potAmount);
     
     event PlayersWhitelisted(address[] players);
     event PlayersRemovedFromWhitelist(address[] players);
     
     // Private notifications for cards (only visible to the player)
-    event CardRevealed(address indexed player, uint8 value, uint8 suit);
+    event CardPeeked(address indexed player, uint8 value, uint8 suit);
     
-    // Added events for Monty Hall feature
-    event MontyHallCardsRevealed(address indexed player, uint8[] values, uint8[] suits);
-    event MontyHallSwapResult(address indexed player, uint8 oldValue, uint8 oldSuit, uint8 newValue, uint8 newSuit);
+    // Event for card swap - reduced information, just notification that a swap happened
+    event CardSwapped(address indexed player, uint8 oldValue, uint8 oldSuit);
+    
+    // Private confirmation for betting actions
+    event BettingConfirmation(address indexed player, string action, uint256 amount);
     
     // Events for spectating
     event GameSpectatable(uint256 indexed gameId, GameLibrary.GameState state, uint256 playerCount);
@@ -184,9 +190,10 @@ contract OneCard {
         emit PlayersRemovedFromWhitelist(players);
     }
     
-    function isWhitelisted(address player) public view returns (bool) {
-        return whitelistedPlayers[player];
-    }
+    // Remove redundant getter since mapping is now public
+    // function isWhitelisted(address player) public view returns (bool) {
+    //     return whitelistedPlayers[player];
+    // }
     
     // Bitmap operations for card assignments using GameLibrary
     function _isCardAssigned(uint256 gameId, uint8 cardIdx) private view returns (bool) {
@@ -205,18 +212,7 @@ contract OneCard {
         games[gameId].cardAssignmentBitmap = GameLibrary.clearCardAssignments();
     }
     
-    // Bitmap operations for Monty Hall revealed cards using GameLibrary
-    function _isCardRevealed(uint256 gameId, uint8 cardIdx) private view returns (bool) {
-        return GameLibrary.isCardRevealed(games[gameId].revealedCardsBitmap, cardIdx);
-    }
-    
-    function _markCardRevealed(uint256 gameId, uint8 cardIdx) private {
-        games[gameId].revealedCardsBitmap = GameLibrary.markCardRevealed(games[gameId].revealedCardsBitmap, cardIdx);
-    }
-    
-    function _clearRevealedCards(uint256 gameId) private {
-        games[gameId].revealedCardsBitmap = GameLibrary.clearRevealedCards();
-    }
+    // Removed bitmap operations for revealed cards
     
     // NEW: Update game state version
     function _incrementStateVersion(uint256 gameId) private {
@@ -384,9 +380,6 @@ contract OneCard {
         // Deal cards to players
         _dealCards(gameId);
         
-        // Clear any revealed cards bitmap
-        _clearRevealedCards(gameId);
-        
         // Update state version
         _incrementStateVersion(gameId);
         
@@ -470,83 +463,47 @@ contract OneCard {
         CardLibrary.Card memory playerCard = game.deck[cardIdx];
         
         // Use a private event to notify the player of their card
-        emit CardRevealed(msg.sender, playerCard.value, playerCard.suit);
+        emit CardPeeked(msg.sender, playerCard.value, playerCard.suit);
         
-        // Combined player action event with nonce and rational
-        emit PlayerAction(gameId, msg.sender, "peek", PEEK_FEE, player.actionNonce, rational);
+        // Public event that just shows action type (visible to all)
+        emit PlayerActionType(gameId, msg.sender, "peek");
+        
+        // Private detailed event (only visible to the player)
+        emit PlayerActionDetails(gameId, msg.sender, "peek", PEEK_FEE, player.actionNonce, rational);
     }
     
-    // Function for the Monty Hall option
-    function useMontyHallOption(uint256 gameId, string calldata rational) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    // Function to swap card - only available if player has peeked
+    // Split into two functions to avoid stack too deep errors
+    function swapCard(uint256 gameId, string calldata rational) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
         Game storage game = games[gameId];
         Player storage player = game.playerInfo[msg.sender];
         
         require(game.state == GameLibrary.GameState.PEEK_PHASE, "Not peek phase");
         require(block.timestamp < game.phaseEndTime, "Peek phase ended");
-        require(!player.usedMontyHall, "Already used Monty Hall option");
-        require(player.chipBalance >= MONTY_HALL_FEE, "Insufficient chips");
+        require(player.hasPeeked, "Must peek at card first");
+        require(!player.hasSwappedCard, "Already used swap option");
+        require(player.chipBalance >= SWAP_FEE, "Insufficient chips");
         
-        // Deduct the Monty Hall fee
-        unchecked { player.chipBalance -= MONTY_HALL_FEE; }
-        player.usedMontyHall = true;
+        // Update player state
+        unchecked { player.chipBalance -= SWAP_FEE; }
+        player.hasSwappedCard = true;
         player.lastActionTime = block.timestamp;
-        
-        // Increment action nonce
         unchecked { player.actionNonce++; }
-        
-        // Store the rationalization
         player.lastActionRational = rational;
         
-        // Find random unassigned cards to reveal
-        uint8[] memory revealedValues = new uint8[](MONTY_HALL_REVEALS);
-        uint8[] memory revealedSuits = new uint8[](MONTY_HALL_REVEALS);
-        uint8[] memory revealedIndices = new uint8[](MONTY_HALL_REVEALS);
+        // Execute the swap
+        _executeCardSwap(gameId, player);
         
-        // Find random cards to reveal
-        _findRandomUnassignedCards(gameId, MONTY_HALL_REVEALS, revealedValues, revealedSuits, revealedIndices);
+        // Public event that just shows action type (visible to all)
+        emit PlayerActionType(gameId, msg.sender, "swap");
         
-        // Explicit state check for Monty Hall
-        for (uint8 i = 0; i < MONTY_HALL_REVEALS; i++) {
-            require(revealedIndices[i] > 0, "Invalid Monty Hall card index");
-            require(!_isCardAssigned(gameId, revealedIndices[i]), "Monty Hall card already assigned");
-            require(!_isCardRevealed(gameId, revealedIndices[i]), "Monty Hall card already revealed");
-        }
-        
-        // Mark these cards as revealed
-        for (uint8 i = 0; i < MONTY_HALL_REVEALS; i++) {
-            if (revealedIndices[i] > 0) { // Only mark valid indices (0 is sentinel for "not found")
-                _markCardRevealed(gameId, revealedIndices[i]);
-            }
-        }
-        
-        // Emit the revealed cards to the player
-        emit MontyHallCardsRevealed(msg.sender, revealedValues, revealedSuits);
-        
-        // Combined player action event with nonce and rational
-        emit PlayerAction(gameId, msg.sender, "montyHall", MONTY_HALL_FEE, player.actionNonce, rational);
+        // Private detailed event (only visible to the player)
+        emit PlayerActionDetails(gameId, msg.sender, "swap", SWAP_FEE, player.actionNonce, rational);
     }
     
-    // Function to decide whether to keep or swap card after Monty Hall
-    function montyHallDecision(uint256 gameId, bool swapCard, string calldata rational) external gameExists(gameId) activePlayer(gameId) notInBufferPeriod(gameId) notCleanedUp(gameId) {
+    // Helper function to perform the card swap - breaks up the logic to avoid stack too deep
+    function _executeCardSwap(uint256 gameId, Player storage player) private {
         Game storage game = games[gameId];
-        Player storage player = game.playerInfo[msg.sender];
-        
-        require(game.state == GameLibrary.GameState.PEEK_PHASE, "Not peek phase");
-        require(block.timestamp < game.phaseEndTime, "Peek phase ended");
-        require(player.usedMontyHall, "Monty Hall option not used");
-        
-        // Increment action nonce
-        unchecked { player.actionNonce++; }
-        
-        // Store the rationalization
-        player.lastActionRational = rational;
-        
-        // If player decides not to swap, do nothing except record the action time
-        if (!swapCard) {
-            player.lastActionTime = block.timestamp;
-            emit PlayerAction(gameId, msg.sender, "keepCard", 0, player.actionNonce, rational);
-            return;
-        }
         
         // Get current card info before swapping
         uint8 currentCardIdx = player.cardIdx;
@@ -555,105 +512,41 @@ contract OneCard {
         // Mark the current card as unassigned
         _unassignCard(gameId, currentCardIdx);
         
-        // Get a new unassigned card that hasn't been revealed through Monty Hall
-        uint8 newCardIdx = _getMontyHallSwapCard(gameId);
+        // Get a new unassigned card from the deck
+        uint8 newCardIdx = _getRandomUnassignedCard(gameId);
         
         // Explicit state check for card swap
         require(newCardIdx > 0 && newCardIdx < STANDARD_DECK_SIZE, "Invalid new card index");
         require(!_isCardAssigned(gameId, newCardIdx), "New card already assigned");
-        require(!_isCardRevealed(gameId, newCardIdx), "New card was already revealed");
         
         // Mark the new card as assigned and update player
         _assignCard(gameId, newCardIdx);
         player.cardIdx = newCardIdx;
-        player.lastActionTime = block.timestamp;
         
         // Get the new card info
         CardLibrary.Card memory newCard = game.deck[newCardIdx];
         
-        // Emit the swap result to the player
-        emit MontyHallSwapResult(
+        // Emit the swap result with only old card details (public)
+        emit CardSwapped(
             msg.sender, 
             currentCard.value, 
-            currentCard.suit, 
-            newCard.value, 
-            newCard.suit
+            currentCard.suit
         );
         
-        // If player has peeked, also reveal the new card
-        if (player.hasPeeked) {
-            emit CardRevealed(msg.sender, newCard.value, newCard.suit);
-        }
-        
-        // Combined player action event with nonce and rational
-        emit PlayerAction(gameId, msg.sender, "swapCard", 0, player.actionNonce, rational);
+        // Privately reveal the new card to the player
+        emit CardPeeked(msg.sender, newCard.value, newCard.suit);
     }
     
-    // Helper to find random unassigned and unrevealed cards for Monty Hall
-    function _findRandomUnassignedCards(
-        uint256 gameId, 
-        uint8 count,
-        uint8[] memory values, 
-        uint8[] memory suits,
-        uint8[] memory indices
-    ) private view {
+    // Helper to get a random unassigned card for card swap
+    function _getRandomUnassignedCard(uint256 gameId) private view returns (uint8) {
         Game storage game = games[gameId];
         
-        // Create a list of all eligible card indices (unassigned and unrevealed)
-        uint8[] memory eligibleIndices = new uint8[](STANDARD_DECK_SIZE);
-        uint16 eligibleCount = 0;
-        
-        // Find all eligible cards
-        for (uint8 i = 0; i < game.deck.length; i++) {
-            if (!_isCardAssigned(gameId, i) && !_isCardRevealed(gameId, i)) {
-                eligibleIndices[eligibleCount] = i;
-                eligibleCount++;
-            }
-        }
-        
-        // Ensure we don't try to reveal more cards than are available
-        uint8 actualCount = eligibleCount < count ? uint8(eligibleCount) : count;
-        
-        // Generate random indices using difficulty for seed
-        uint256 seed = block.difficulty;
-        
-        for (uint8 i = 0; i < actualCount; i++) {
-            // Get a random index from our eligible cards
-            uint16 randomIndex = uint16(uint256(keccak256(abi.encodePacked(seed, i, block.timestamp))) % eligibleCount);
-            uint8 cardIdx = eligibleIndices[randomIndex];
-            
-            // Get the card information
-            CardLibrary.Card memory randomCard = game.deck[cardIdx];
-            
-            // Store the card information
-            values[i] = randomCard.value;
-            suits[i] = randomCard.suit;
-            indices[i] = cardIdx;
-            
-            // To avoid duplicates, swap this card with the last one and decrease eligible count
-            // This efficiently removes the selected card from consideration
-            eligibleIndices[randomIndex] = eligibleIndices[eligibleCount - 1];
-            eligibleCount--;
-        }
-        
-        // Fill unused slots with zeros
-        for (uint8 i = actualCount; i < count; i++) {
-            values[i] = 0;
-            suits[i] = 0;
-            indices[i] = 0;
-        }
-    }
-    
-    // Helper to get a random unassigned and unrevealed card for Monty Hall swap
-    function _getMontyHallSwapCard(uint256 gameId) private view returns (uint8) {
-        Game storage game = games[gameId];
-        
-        // Find all eligible card indices (unassigned and unrevealed)
+        // Find all unassigned card indices
         uint8[] memory eligibleIndices = new uint8[](STANDARD_DECK_SIZE);
         uint16 eligibleCount = 0;
         
         for (uint8 i = 0; i < game.deck.length; i++) {
-            if (!_isCardAssigned(gameId, i) && !_isCardRevealed(gameId, i)) {
+            if (!_isCardAssigned(gameId, i)) {
                 eligibleIndices[eligibleCount] = i;
                 eligibleCount++;
             }
@@ -732,9 +625,16 @@ contract OneCard {
             game.currentBetAmount = player.currentBet;
         }
         
-        // Unified player action event with nonce and rational
-        emit PlayerAction(gameId, msg.sender, "bet", betAmount, player.actionNonce, rational);
-        // Update spectators
+        // Public event for action type (no details)
+        emit PlayerActionType(gameId, msg.sender, "bet");
+        
+        // Private confirmation of bet amount
+        emit BettingConfirmation(msg.sender, "bet", betAmount);
+        
+        // Private detailed event (only visible to the player)
+        emit PlayerActionDetails(gameId, msg.sender, "bet", betAmount, player.actionNonce, rational);
+        
+        // Update spectators with game state (but not bet details)
         emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount, game.stateVersion);
     }
     
@@ -759,9 +659,16 @@ contract OneCard {
         // Update active player count
         unchecked { game.activePlayerCount--; }
         
-        // Unified player action event with nonce and rational
-        emit PlayerAction(gameId, msg.sender, "fold", 0, player.actionNonce, rational);
-        // Update spectators
+        // Public event for action type (no details)
+        emit PlayerActionType(gameId, msg.sender, "fold");
+        
+        // Private confirmation of fold
+        emit BettingConfirmation(msg.sender, "fold", 0);
+        
+        // Private detailed event (only visible to the player)
+        emit PlayerActionDetails(gameId, msg.sender, "fold", 0, player.actionNonce, rational);
+        
+        // Update spectators with game state (but not all details)
         emit GameStateUpdated(gameId, game.state, game.potAmount, game.currentBetAmount, game.stateVersion);
         
         // Check if only one player remains
@@ -830,7 +737,7 @@ contract OneCard {
             // Reveal card to all players
             uint8 cardIdx = game.playerInfo[player].cardIdx;
             CardLibrary.Card memory playerCard = game.deck[cardIdx];
-            emit CardRevealed(player, playerCard.value, playerCard.suit);
+            emit CardPeeked(player, playerCard.value, playerCard.suit);
         }
         
         // Award pot to the winner
@@ -966,7 +873,7 @@ contract OneCard {
     function getPlayerInfo(uint256 gameId, address player) external view gameExists(gameId) returns (
         bool isActive,
         bool hasPeeked,
-        bool usedMontyHall,
+        bool hasSwappedCard,
         bool hasFolded,
         uint256 chipBalance,
         uint256 currentBet,
@@ -980,7 +887,7 @@ contract OneCard {
         return (
             playerData.isActive,
             playerData.hasPeeked,
-            playerData.usedMontyHall,
+            playerData.hasSwappedCard,
             playerData.hasFolded,
             playerData.chipBalance,
             playerData.currentBet,
@@ -1025,10 +932,10 @@ contract OneCard {
         }
     }
     
-    // Get all active games for spectating
-    function getActiveGames() external view returns (uint256[] memory) {
-        return activeGames;
-    }
+    // Remove redundant getter since activeGames is now public
+    // function getActiveGames() external view returns (uint256[] memory) {
+    //     return activeGames;
+    // }
     
     // Get all cards for spectating during SHOWDOWN or ENDED phases
     function getRevealedCardsForSpectating(uint256 gameId) external view gameExists(gameId) returns (
@@ -1166,8 +1073,11 @@ contract OneCard {
         delete game.playerInfo[msg.sender];
         playerCurrentGame[msg.sender] = 0;
         
-        // Emit player action for leaving (nonce is 0 as we've deleted the player)
-        emit PlayerAction(gameId, msg.sender, "leave", 0, 0, rational);
+        // Public event for action type (no details)
+        emit PlayerActionType(gameId, msg.sender, "leave");
+        
+        // Private detailed event (only visible to the player)
+        emit PlayerActionDetails(gameId, msg.sender, "leave", 0, 0, rational);
     }
     
     // Function to clean up after a game

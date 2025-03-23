@@ -58,7 +58,7 @@ interface IOneCard {
     function getPlayerInfo(uint256 gameId, address player) external view returns (
         bool isActive,
         bool hasPeeked,
-        bool usedMontyHall,
+        bool hasSwappedCard,
         bool hasFolded,
         uint256 chipBalance,
         uint256 currentBet,
@@ -73,7 +73,8 @@ interface IOneCard {
     event PeekPhaseStarted(uint256 indexed gameId);
     event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce, string rational);
+    event PlayerActionType(uint256 indexed gameId, address player, string actionType);
+    event CardSwapped(address indexed player, uint8 oldValue, uint8 oldSuit);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
     
@@ -93,7 +94,8 @@ contract PokerSpectatorView {
     event PeekPhaseStarted(uint256 indexed gameId);
     event BufferPeriodStarted(uint256 indexed gameId, GameLibrary.GameState currentState, GameLibrary.GameState nextState);
     event BettingPhaseStarted(uint256 indexed gameId);
-    event PlayerAction(uint256 indexed gameId, address indexed player, string action, uint256 amount, uint256 nonce, string rational);
+    event PlayerActionType(uint256 indexed gameId, address player, string actionType);
+    event CardSwapped(address indexed player, uint8 oldValue, uint8 oldSuit);
     event ShowdownStarted(uint256 indexed gameId);
     event GameEnded(uint256 indexed gameId, address indexed winner, uint256 potAmount);
     event GameSpectatable(uint256 indexed gameId, GameLibrary.GameState state, uint256 playerCount);
@@ -239,7 +241,7 @@ contract PokerSpectatorView {
     function getPlayerInfo(uint256 gameId, address player) external view returns (
         bool isActive,
         bool hasPeeked,
-        bool usedMontyHall,
+        bool hasSwappedCard,
         bool hasFolded,
         uint256 chipBalance,
         uint256 currentBet,

@@ -1,7 +1,7 @@
 {
   "_format": "hh-sol-artifact-1",
   "contractName": "IOneCard",
-  "sourceName": "contracts/PokerSpectatorView.sol",
+  "sourceName": "contracts/AI/PokerSpectatorView.sol",
   "abi": [
     {
       "anonymous": false,
